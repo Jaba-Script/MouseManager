@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mouse Manager · Spike S2</string>
+    <string name="service_label">Mouse Manager · перехват клавиш (S2)</string>
+    <string name="accessibility_description">Диагностический спайк: показывает клавиши, которые мышь присылает вместо боковых кнопок, и умеет поглощать Ctrl+C / Ctrl+V от выбранного устройства. Ничего не переназначает.</string>
+</resources>
