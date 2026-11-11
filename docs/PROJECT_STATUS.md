@@ -7,23 +7,24 @@
 
 | Параметр | Значение |
 |---|---|
-| Фаза | Документация и архитектура. Реализация основного приложения **не начата**. |
-| Следующий шаг | ADR приняты. План M0 проверен 2026-11-11 и уточнён (**D-022**); дата начала не назначена — нужен отдельный старт. |
-| M0 | **Не начат.** План уточнён (D-022). Ничего не скопировано, не перенесено, `git init` не выполнялся, корневой проект не создавался. |
+| Фаза | **M0 завершён**: продукт в корне, спайки в архиве. Реализация **M1 не начата**. |
+| Следующий шаг | **M1 — скелет приложения** (служба, DataStore, каталог устройств). Старт — по отдельному подтверждению. |
+| M0 | **Завершён 2026-11-11** (этапы 1–7): резервная копия, baseline commit, архив S1/S2 с проверкой сборок, удаление дубликатов, скелет продукта, reorg commit. Итоги — D-023. |
 | Мастер-переключатель | **Всегда выключается** при старте процесса/подключении службы (D-006) |
 | Профили | Именованные + ручное переключение в v1; per-app — M3 (D-011) |
 | Действия v1 | 8 глобальных действий (D-010); «вперёд» — только через S3 (D-021) |
 | Устройство | Xiaomi Pad 6 Pro `23046RP50C` (`liuqin`), Android 15 / API 35, HyperOS `OS3.0.7.0.VMYCNXM` |
 | Экран | 1800×2880, 400 dpi, ландшафт |
-| Пакеты | S1 `com.mousemanager.diagnostics` · S2 `com.mousemanager.spike.s2` · продукт `com.mousemanager` (подтверждено) |
-| Git | **не инициализирован**. Рекомендуется `git init` + первый commit до реорганизации. |
+| Пакеты | Продукт `com.mousemanager` — в корне · S1 `com.mousemanager.diagnostics` — архив `spikes/s1/` · S2 `com.mousemanager.spike.s2` — архив `spikes/s2/` |
+| Git | Инициализирован 2026-11-11; локально `core.autocrlf=false`. Коммиты: `ecceb12` (baseline) и reorg (HEAD). |
 | Установлено на планшете | S1 и S2. Служба S2 включена в системе, перехват **выключен**. |
 
 ## 2. Что уже проверено на устройстве
 
 ### 2.1 Spike S1 — диагностика ввода
 
-Отдельный проект в корне `D:\Projects\MouseManager` (пакет `com.mousemanager.diagnostics`).
+Проект-спайк, до M0 лежал в корне `D:\Projects\MouseManager`, теперь архив в
+`spikes/s1/` (пакет `com.mousemanager.diagnostics`).
 Собирает `KeyEvent` и `MotionEvent` от всех устройств, показывает источники, `deviceId`,
 `descriptor`, `scanCode`, `metaState`, кнопки мыши. Ничего не поглощает.
 
@@ -45,7 +46,7 @@
 
 ### 2.2 Spike S2 — фильтр клавиш
 
-Отдельная сборка `D:\Projects\MouseManager\spike-s2` (пакет `com.mousemanager.spike.s2`),
+Отдельная сборка, теперь архив в `spikes/s2/` (пакет `com.mousemanager.spike.s2`),
 свой `settings.gradle.kts` и wrapper. S1 не тронут. S2 умеет только «пропустить» или
 «выбросить» аккорд, без переназначения.
 
@@ -111,7 +112,7 @@
 | SDK | `D:\Android\Sdk` (platform `android-36`) |
 | adb | `D:\Android\Sdk\platform-tools\adb.exe` |
 | DataStore (план) | `androidx.datastore:datastore-preferences:1.3.0` — проверено: `minCompileSdk=34`, `minAGP=8.1.1` |
-| Git (план M0) | 2.46.0; идентичность резолвится как `Jaba-Script <178173545+Jaba-Script@users.noreply.github.com>` (глобальная, не меняется); локально будет `core.autocrlf=false`, т.к. системный `gitconfig` задаёт `true` (D-022) |
+| Git (факт) | 2.46.0; репозиторий инициализирован 2026-11-11; локально `core.autocrlf=false` (системный `gitconfig` задаёт `true`, D-022); identity `Jaba-Script <178173545+Jaba-Script@users.noreply.github.com>` — глобальная, не менялась |
 
 Сборка S2:
 
@@ -124,22 +125,34 @@ Set-Location D:\Projects\MouseManager\spike-s2
 ## 5. Структура сейчас
 
 ```
-D:\Projects\MouseManager\          ← корень; одновременно Gradle-проект S1
-  app\                             ← модуль S1 (диагностика)
-  spike-s2\                        ← независимый Gradle-проект S2
-  docs\                            ← документация
-  AGENTS.md
-  settings.gradle.kts, build.gradle.kts, gradlew*
-```
-
-Целевая структура и порядок переноса — `docs/ROADMAP.md` (M0). Кратко:
-
-```
 D:\Projects\MouseManager\          ← корень репозитория и проект продукта
-  app\                             ← продукт
-  docs\
-  spikes\s1\                       ← архив S1 (отдельная сборка)
-  spikes\s2\                       ← архив S2 (отдельная сборка)
+  app\                             ← продукт (com.mousemanager), скелет M0
+  docs\                            ← документация
+  spikes\s1\                       ← архив S1 (отдельная сборка, com.mousemanager.diagnostics)
+  spikes\s2\                       ← архив S2 (отдельная сборка, com.mousemanager.spike.s2)
+  settings.gradle.kts, build.gradle.kts, gradle.properties
+  gradlew, gradlew.bat, gradle\wrapper\  ← wrapper 8.14.6
+  local.properties                 ← `sdk.dir=D:/Android/Sdk`, не коммитится
+  AGENTS.md, .gitignore, opencode.jsonc
+```
+
+Резервная копия до M0: `D:\Projects\MouseManager-backup-20261111-135022` (67 файлов,
+`_manifest-sha256.csv`, APK в `_artifacts/`). Не удаляется.
+
+`spikes/*` в корневую сборку не входят: `settings.gradle.kts` содержит только `include(":app")`.
+
+Сборки:
+
+```powershell
+# продукт (корень)
+Set-Location D:\Projects\MouseManager
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
+
+# архивные спайки — каждая отдельно, из своего каталога
+Set-Location D:\Projects\MouseManager\spikes\s1
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
+Set-Location D:\Projects\MouseManager\spikes\s2
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
 ```
 
 ## 6. Что ещё не проверено
@@ -171,7 +184,8 @@ D:\Projects\MouseManager\          ← корень репозитория и п
 
 ### Осталось
 
-1. **M0** — план проверен и уточнён (D-022); дата начала не назначена; ждём отдельного подтверждения.
+1. **M1 — скелет приложения** (служба, DataStore, каталог устройств, диагностика); ждёт
+   отдельного подтверждения на старт.
 2. **Panic-кнопка** — добавлять Quick Settings tile для мгновенного отключения?
 3. **Судьба S1/S2 на планшете** — оставить как архив или удалить после M1?
 4. **Диагностика в release** — нужен ли экспорт журнала в файл?
@@ -200,4 +214,11 @@ D:\Projects\MouseManager\          ← корень репозитория и п
 | 2026-11-11 | Уточнения пользователя: `armed` всегда off, именованные профили в v1, 8 действий, reorg с backup; обновлены D-001/D-005/D-006/D-010/D-011/D-013/D-016/D-018, добавлен D-021 |
 | 2026-11-11 | ADR и архитектура приняты; пакет `com.mousemanager` подтверждён; **M0 отложен на 2026-11-12**; ничего не копировалось/не переносилось, `git init` не выполнялся |
 | 2026-11-11 | Предпусковая проверка M0: структура подтверждена (`.git`/`spikes/`/backup отсутствуют, S1/S2 на местах), уточнения плана приняты — **D-022**; `.gitignore` дополнен; дата начала M0 не назначена; операции M0 не выполнялись |
-| — | Реализация продукта не начиналась; M0 не начат |
+| 2026-11-11 | M0 этап 1: резервная копия `MouseManager-backup-20261111-135022`, 67/67 файлов, SHA-256 сверены, APK в `_artifacts/` |
+| 2026-11-11 | M0 этап 2: `git init`, локально `core.autocrlf=false`, baseline commit `ecceb12` — 67 файлов, рабочее дерево чистое |
+| 2026-11-11 | M0 этап 3: S1/S2 скопированы в `spikes/s1`, `spikes/s2` (31+31 файл), источник == копия по SHA-256, 60/60 совпали с манифестом backup |
+| 2026-11-11 | M0 этап 4: `spikes/s1` и `spikes/s2` собираются (`BUILD SUCCESSFUL`); APK S2 бит-в-бит совпал с эталоном, APK S1 отличается только мёртвым padding инкрементальной сборки (D-023) |
+| 2026-11-11 | M0 этап 5: удалены дубликаты из корня (`app/`, `spike-s2/`, 52 отслеживаемых файла); покрытие 22/22 и 30/30 доказано до удаления; 67/67 файлов манифеста сохранены в корне или `spikes/` |
+| 2026-11-11 | M0 этап 6: создан скелет продукта `app/` (`com.mousemanager`, 7 файлов), `:app:assembleDebug` успешен, minSdk 29 / targetSdk 35 / 0.1.0 подтверждены `aapt2` |
+| 2026-11-11 | M0 этап 7: commit «reorg: product root, spikes archived», документация обновлена, **M0 завершён** |
+| — | Следующий шаг — M1 (скелет приложения); реализация не начата |

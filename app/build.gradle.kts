@@ -5,13 +5,13 @@ plugins {
 }
 
 android {
-    namespace = "com.mousemanager.diagnostics"
+    namespace = "com.mousemanager"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
 
     defaultConfig {
-        applicationId = "com.mousemanager.diagnostics"
-        minSdk = 26
+        applicationId = "com.mousemanager"
+        minSdk = 29
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
@@ -61,5 +61,4 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-core")
 }

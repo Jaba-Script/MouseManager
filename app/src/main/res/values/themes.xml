@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Тема для манифеста; цвета и оформление задаёт Compose (ui/theme/Theme.kt). -->
     <style name="Theme.MouseManager" parent="android:Theme.Material.Light.NoActionBar" />
 </resources>

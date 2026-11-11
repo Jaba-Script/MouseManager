@@ -1,14 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Mouse Manager</string>
-    <string name="app_tagline">Spike S1 · диагностика мыши</string>
-    <string name="devices_title">Устройства ввода</string>
-    <string name="refresh">Обновить</string>
-    <string name="clear">Очистить</string>
-    <string name="no_devices">Устройства не найдены</string>
-    <string name="empty_title">Событий пока нет</string>
-    <string name="empty_hint">Подключите мышь и подвигайте ею — события появятся здесь в реальном времени. Журнал не перехватывает ввод: всё уходит дальше в Android как обычно.</string>
-    <string name="stat_motion">Motion</string>
-    <string name="stat_keys">Key</string>
-    <string name="stat_last">Последнее</string>
+    <string name="skeleton_note">Скелет приложения. Перехват кнопок мыши ещё не реализован.</string>
 </resources>
