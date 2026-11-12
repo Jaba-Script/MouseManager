@@ -1,224 +1,103 @@
 # PROJECT_STATUS — Mouse Manager
 
-> Единственный источник истины о состоянии проекта.
-> Обновляется после каждой задачи. Дата: **2026-11-11**.
+> Единственный источник истины о состоянии. Обновляется после каждой задачи.
+> Дата: **2026-11-12**.
 
 ## 1. Кратко
 
 | Параметр | Значение |
 |---|---|
-| Фаза | **M0 завершён**: продукт в корне, спайки в архиве. Реализация **M1 не начата**. |
-| Следующий шаг | **M1 — скелет приложения** (служба, DataStore, каталог устройств). Старт — по отдельному подтверждению. |
-| M0 | **Завершён 2026-11-11** (этапы 1–7): резервная копия, baseline commit, архив S1/S2 с проверкой сборок, удаление дубликатов, скелет продукта, reorg commit. Итоги — D-023. |
-| Мастер-переключатель | **Всегда выключается** при старте процесса/подключении службы (D-006) |
+| Фаза | **M0 завершён**, реализация **M1 не начата** |
+| Следующий шаг | **M1 — скелет приложения**: служба, DataStore, каталог устройств, статус. Старт — по отдельному подтверждению |
+| HEAD | `d6c72a3` «reorg: product root, spikes archived»; до него `ecceb12` baseline |
+| M0 | Завершён 2026-11-11 (этапы 1–7), итоги — D-023 |
+| Мастер-переключатель | Всегда `false` при старте процесса и подключении службы (D-006) |
 | Профили | Именованные + ручное переключение в v1; per-app — M3 (D-011) |
-| Действия v1 | 8 глобальных действий (D-010); «вперёд» — только через S3 (D-021) |
-| Устройство | Xiaomi Pad 6 Pro `23046RP50C` (`liuqin`), Android 15 / API 35, HyperOS `OS3.0.7.0.VMYCNXM` |
-| Экран | 1800×2880, 400 dpi, ландшафт |
-| Пакеты | Продукт `com.mousemanager` — в корне · S1 `com.mousemanager.diagnostics` — архив `spikes/s1/` · S2 `com.mousemanager.spike.s2` — архив `spikes/s2/` |
-| Git | Инициализирован 2026-11-11; локально `core.autocrlf=false`. Коммиты: `ecceb12` (baseline) и reorg (HEAD). |
-| Установлено на планшете | S1 и S2. Служба S2 включена в системе, перехват **выключен**. |
+| Действия v1 | 8 глобальных (D-010); «вперёд» нет, только S3 (D-021) |
+| Пакеты | продукт `com.mousemanager` (корень) · S1 `…diagnostics` · S2 `…spike.s2` (архив `spikes/`) |
+| Устройство | Xiaomi Pad 6 Pro `23046RP50C` (`liuqin`), Android 15 / API 35, HyperOS `OS3.0.7.0.VMYCNXM`, 1800×2880, 400 dpi, ландшафт |
+| На планшете | S1 и S2 установлены; служба S2 включена, перехват **выключен** |
 
-## 2. Что уже проверено на устройстве
+## 2. Проверено на устройстве
 
-### 2.1 Spike S1 — диагностика ввода
+Полные измерения, обстоятельства и хэши — `docs/SPIKES.md`. Коротко:
 
-Проект-спайк, до M0 лежал в корне `D:\Projects\MouseManager`, теперь архив в
-`spikes/s1/` (пакет `com.mousemanager.diagnostics`).
-Собирает `KeyEvent` и `MotionEvent` от всех устройств, показывает источники, `deviceId`,
-`descriptor`, `scanCode`, `metaState`, кнопки мыши. Ничего не поглощает.
+1. Боковые кнопки VXE R1SE+ — аккорд `Ctrl+C` / `Ctrl+V` от устройства мыши, а не `BUTTON_BACK/FORWARD`.
+2. `descriptor` мыши стабилен (`ce5035b0…3992`), `deviceId` меняется — привязка только по `descriptor`.
+3. `FLAG_REQUEST_FILTER_KEY_EVENTS` работает на HyperOS 3: `flags=0x20`, клавиши реально гасятся.
+4. `adb shell input` фильтру не виден → автотестов перехвата нет, только живая мышь.
+5. Клавиши чужих устройств проходят: `gpio-keys`/`pmic_resin` → `VOLUME_UP/DOWN`, громкость 0 → 10.
+6. Средняя кнопка — `ACTION_BUTTON_PRESS` + `BUTTON_TERTIARY`, мимо `onKeyEvent`.
+7. `onMotionEvent` забирает события у системы → обычные кнопки не переназначаются (D-012).
+8. Аккорд атомарный: 4 события за ~120–180 мс, «зажать кнопку» нельзя.
+9. Перехват не переживает перезапуск процесса (S2: `armed` только в памяти).
 
-Найдено и исправлено в S1:
-
-| Наблюдение | Вывод |
-|---|---|
-| `InputDevice.sources` нельзя сравнивать «по вхождению бита» | Маска источника проверяется точно (`sources and SOURCE_MOUSE == SOURCE_MOUSE` с учётом комбинированных источников) |
-| Виртуальный тачпад приходил как отдельное устройство | Фильтр по шине/виртуальности, иначе журнал забивается мусором |
-| Устройства появляются/исчезают | Опрос раз в 3 с; в продукте заменяется на `InputManager.InputDeviceListener` |
-
-Главные результаты S1:
-
-- Боковые кнопки VXE R1SE+ **не** приходят как `BUTTON_BACK` / `BUTTON_FORWARD`.
-- Они приходят как **клавиатурный аккорд** `Ctrl+C` / `Ctrl+V` от устройства мыши.
-- Левая/правая/средняя кнопки приходят как `ACTION_BUTTON_PRESS/RELEASE` с
-  `BUTTON_PRIMARY` / `BUTTON_SECONDARY` / `BUTTON_TERTIARY`.
-- `BUTTON_BACK` / `BUTTON_FORWARD` не приходят вообще.
-
-### 2.2 Spike S2 — фильтр клавиш
-
-Отдельная сборка, теперь архив в `spikes/s2/` (пакет `com.mousemanager.spike.s2`),
-свой `settings.gradle.kts` и wrapper. S1 не тронут. S2 умеет только «пропустить» или
-«выбросить» аккорд, без переназначения.
-
-Все 7 условий приняты на устройстве:
-
-| № | Условие | Результат | Доказательство |
-|---|---|---|---|
-| 1 | Отдельный проект, S1 не изменён | ✅ | `spike-s2\` со своим wrapper; файлы S1 не менялись |
-| 2 | `canRequestFilterKeyEvents` работает | ✅ | `onServiceConnected flags=0x20 filterRequested=true` |
-| 3 | `descriptor` стабилен при переподключении | ✅ | `ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992` при `deviceId` 29 → 30 → 31; 2 переподключения, цель сохранилась |
-| 4 | Перехват `Ctrl+C` / `Ctrl+V` | ✅ | 12 событий `CONSUMED` (3 аккорда × 4 события) |
-| 5 | Обычная клавиатура/кнопки не ломаются | ✅ | `VOLUME_UP`/`VOLUME_DOWN` от `gpio-keys` и `pmic_resin` → `PASSED_OTHER_DEVICE`; громкость 0 → 10 |
-| 6 | Без полноценного ремапа | ✅ | только `PASS` / `DROP`, `ChordPolicy` = `{CtrlLeft, CtrlRight, C, V}` |
-| 7 | Простое отключение | ✅ | тумблер → `PASSED_DISARMED` при `target=true`; перехват не переживает перезапуск процесса |
-
-> В продукте поведение строже: `armed` вообще не хранится и сбрасывается при каждом
-> старте процесса/подключении службы (D-006).
-
-Дополнительно выяснено:
-
-- **`adb shell input` невидим фильтру.** Инъекция текста доходит до поля, но `onKeyEvent`
-  не вызывается. Автотесты перехвата через adb невозможны, только живая мышь.
-- **`deviceId` нельзя использовать как идентификатор.** За одну сессию мышь получила
-  29, 30 и 31 при неизменном `descriptor`.
-- **Аккорд атомарный.** Один клик = `Ctrl↓ C↓ Ctrl↑ C↑` за ~120–180 мс. Долгого
-  удержания нет, «зажать боковую кнопку» как жест невозможно.
-- **Средняя кнопка — не клавиша.** `ACTION_BUTTON_PRESS` + `BUTTON_TERTIARY`, мимо
-  `onKeyEvent`.
-- **`isAccessibilityTool="false"` не мешает.** HyperOS 3 включил службу без
-  «ограниченных настроек» (установка через adb, installer = null).
-
-## 3. Ключевые измерения (не перепроверять)
-
-| Величина | Значение |
-|---|---|
-| Мышь | `VXE R1SE+ Mouse` |
-| `descriptor` мыши | `ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992` |
-| История `deviceId` | 19 → 25 → 26/27 → 29 → 30 → 31 (в разных сессиях) |
-| Scan-коды аккорда | 29 = `KEYCODE_CTRL_LEFT`, 46 = `KEYCODE_C`, 47 = `KEYCODE_V` |
-| `metaState` на DOWN | `0x3000` (`META_CTRL_ON | META_CTRL_LEFT_ON`) |
-| `metaState` на UP | `0x0` |
-| Порядок аккорда | `Ctrl↓` → `C/V↓` → `Ctrl↑` → `C/V↑` |
-| Длительность аккорда | ~120–180 мс |
-| Флаги службы | `0x20` = `FLAG_REQUEST_FILTER_KEY_EVENTS` |
-| `gpio-keys` descriptor | `485d69228e24…` |
-| `pmic_resin` descriptor | `653e1ca6257f…` |
-| APK S2 | ~28.8 MB (27.5 MiB), DEX не сжат из-за `minSdk 29` |
-
-## 4. Окружение сборки
+## 3. Окружение и сборка
 
 | Что | Значение |
 |---|---|
-| ОС разработки | Windows, JDK 17 (Temurin 17.0.21) |
-| Android Studio | **нет** |
-| Gradle | wrapper 8.14.6 (official dist) |
-| AGP | 8.13.2 |
-| Kotlin | 2.3.21 + `org.jetbrains.kotlin.plugin.compose` 2.3.21 |
-| Compose BOM | 2026.06.01 |
-| `activity-compose` | 1.13.0 |
-| compileSdk / targetSdk | 36 / 35 |
-| buildTools | 36.1.0 (зафиксирован) |
-| Java/Kotlin target | 17 |
-| SDK | `D:\Android\Sdk` (platform `android-36`) |
+| ОС / JDK | Windows, JDK 17 (Temurin 17.0.21); Android Studio нет |
+| Gradle / AGP / Kotlin | wrapper 8.14.6 · AGP 8.13.2 · Kotlin 2.3.21 + compose plugin |
+| Compose / activity | BOM 2026.06.01 · `activity-compose` 1.13.0 |
+| SDK | `D:\Android\Sdk` (platform 36, build-tools 36.1.0); compileSdk 36 / targetSdk 35 / minSdk 29 |
 | adb | `D:\Android\Sdk\platform-tools\adb.exe` |
-| DataStore (план) | `androidx.datastore:datastore-preferences:1.3.0` — проверено: `minCompileSdk=34`, `minAGP=8.1.1` |
-| Git (факт) | 2.46.0; репозиторий инициализирован 2026-11-11; локально `core.autocrlf=false` (системный `gitconfig` задаёт `true`, D-022); identity `Jaba-Script <178173545+Jaba-Script@users.noreply.github.com>` — глобальная, не менялась |
-
-Сборка S2:
+| DataStore (план) | `androidx.datastore:datastore-preferences:1.3.0` (`minCompileSdk=34`, `minAGP=8.1.1`) |
+| Git | 2.46.0; локально `core.autocrlf=false`; identity `Jaba-Script <178173545+Jaba-Script@users.noreply.github.com>` |
 
 ```powershell
-Set-Location D:\Projects\MouseManager\spike-s2
-.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
-# app\build\outputs\apk\debug\app-debug.apk
+# сборка продукта
+Set-Location D:\Projects\MouseManager; .\gradlew.bat :app:assembleDebug --no-daemon --console=plain
+# установка — только с разрешения пользователя
+& "D:\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
+# лог (единый тег) и скриншот
+& "D:\Android\Sdk\platform-tools\adb.exe" logcat -d -s MouseManager:D
+& "D:\Android\Sdk\platform-tools\adb.exe" exec-out screencap -p > shot.png
 ```
 
-## 5. Структура сейчас
+Спайки собираются отдельно, каждый из своего каталога (`spikes/s1`, `spikes/s2`):
+в корневую сборку не входят (`settings.gradle.kts` содержит только `include(":app")`).
+
+## 4. Структура
 
 ```
-D:\Projects\MouseManager\          ← корень репозитория и проект продукта
-  app\                             ← продукт (com.mousemanager), скелет M0
-  docs\                            ← документация
-  spikes\s1\                       ← архив S1 (отдельная сборка, com.mousemanager.diagnostics)
-  spikes\s2\                       ← архив S2 (отдельная сборка, com.mousemanager.spike.s2)
-  settings.gradle.kts, build.gradle.kts, gradle.properties
-  gradlew, gradlew.bat, gradle\wrapper\  ← wrapper 8.14.6
-  local.properties                 ← `sdk.dir=D:/Android/Sdk`, не коммитится
-  AGENTS.md, .gitignore, opencode.jsonc
+D:\Projects\MouseManager\   ← корень репозитория и проект продукта
+  app\                      ← продукт com.mousemanager (скелет M0, 7 файлов)
+  docs\                     ← документация (вход — AGENTS.md)
+  spikes\s1\, spikes\s2\    ← замороженный архив доказательств, отдельные сборки
+  gradlew, gradlew.bat, gradle\wrapper\   ← wrapper 8.14.6
+  local.properties          ← sdk.dir=D:/Android/Sdk, не коммитится
 ```
 
 Резервная копия до M0: `D:\Projects\MouseManager-backup-20261111-135022` (67 файлов,
-`_manifest-sha256.csv`, APK в `_artifacts/`). Не удаляется.
+`_manifest-sha256.csv`, APK в `_artifacts/`) — не удаляется.
 
-`spikes/*` в корневую сборку не входят: `settings.gradle.kts` содержит только `include(":app")`.
+## 5. Не проверено и риски
 
-Сборки:
-
-```powershell
-# продукт (корень)
-Set-Location D:\Projects\MouseManager
-.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
-
-# архивные спайки — каждая отдельно, из своего каталога
-Set-Location D:\Projects\MouseManager\spikes\s1
-.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
-Set-Location D:\Projects\MouseManager\spikes\s2
-.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
-```
-
-## 6. Что ещё не проверено
-
-| Вопрос | Почему важно | Как проверять |
-|---|---|---|
-| **Полноценная клавиатура** (чехол/Bluetooth) | S2 проверял только `VOLUME_UP/DOWN`; это доказывает фильтрацию по устройству, но **не** совместимость с клавиатурой. Буквы, модификаторы, IME и аппаратные сочетания не проверены | Чек-лист `ARCHITECTURE.md` §16.2, п. 13, когда появится железо |
-| **Побочный эффект «голого» Ctrl** | Мы пропускаем Ctrl, приложение видит нажатие/отпускание без буквы; ожидаемо инертно, но не проверено | Живой тест в M2: браузер, редактор, IME, игры |
-| Действие «вперёд» | Публичные API не дают; Shizuku может дать браузерозависимый вариант | Spike S3 (D-021) |
-| Инъекция клавиш без root | Нужна для «вперёд» и app-specific действий | Spike S3 (`INJECT_EVENTS`, Shizuku) |
-| `performGlobalAction(LOCK_SCREEN/SCREENSHOT)` на HyperOS | OEM может ограничивать | Живой тест в M2 |
-| Поведение при выключенном экране | Фильтр может не получать события | Живой тест |
-| Две одинаковые мыши | Одинаковый `descriptor` → неразличимы | Задокументировано как ограничение |
-| Android 26–28 | `descriptor` недоступен | Не поддерживаем, `minSdk 29` (D-001) |
-| DataStore повреждён/недоступен | Должен быть fail-safe, не блокировать ввод | Unit-тесты кодека + ручной сброс |
-
-## 7. Решено и открытые вопросы
-
-### Решено 2026-11-11
-
-| Вопрос | Ответ |
+| Вопрос / риск | Как закрывать |
 |---|---|
-| Реорганизация | `git init` + первый commit + резервная копия; S1 → `spikes/s1/`, S2 → `spikes/s2/`; продукт в корне; проверить сборку спайков (D-016) |
-| Мастер-переключатель | Всегда выключается при старте процесса/подключении службы; `armed` не хранится (D-006) |
-| Профили | Именованные, создание/переименование/удаление/ручное переключение в v1; per-app — M3 (D-011) |
-| Действия v1 | Все 8: BACK, HOME, RECENTS, NOTIFICATIONS, QUICK_SETTINGS, POWER_DIALOG, LOCK_SCREEN, SCREENSHOT; проверка результата + сообщение (D-010) |
-| «Вперёд» | Не закрыто окончательно: публичные API не дают; Shizuku — потенциально; эксперимент S3 (D-021) |
-| Имя пакета | `com.mousemanager` (подтверждено) |
+| Полноценная клавиатура: буквы, модификаторы, IME, сочетания | чек-лист `ARCHITECTURE.md` §16.2 п. 13, когда появится железо |
+| Побочный эффект «голого» Ctrl | живой тест в M2: браузер, редактор, IME, игры |
+| `performGlobalAction(LOCK_SCREEN/SCREENSHOT)` на HyperOS | живой тест в M2 |
+| Поведение при выключенном экране | живой тест |
+| Две одинаковые мыши → один `descriptor` | ограничение; предупреждение в UI |
+| DataStore повреждён/медленный | fail-safe (D-018), unit-тесты кодека |
+| Обновление HyperOS меняет фильтр | проверка `flags` при подключении, честный статус |
+| Забытый включённый перехват | `armed` не сохраняется (D-006), крупный статус, panic tile |
 
-### Осталось
+## 6. Открытые вопросы
 
-1. **M1 — скелет приложения** (служба, DataStore, каталог устройств, диагностика); ждёт
-   отдельного подтверждения на старт.
-2. **Panic-кнопка** — добавлять Quick Settings tile для мгновенного отключения?
-3. **Судьба S1/S2 на планшете** — оставить как архив или удалить после M1?
+1. **M1** — ждёт отдельного подтверждения на старт.
+2. **Panic tile** — нужен ли Quick Settings tile для мгновенного отключения (M4)?
+3. **S1/S2 на планшете** — оставить как архив или удалить после M1?
 4. **Диагностика в release** — нужен ли экспорт журнала в файл?
-5. **Клавиатура** — прогнать чек-лист, когда появится железо.
+5. **«Вперёд»** — только после спайка S3 (D-021).
 
-## 8. Риски
-
-| Риск | Влияние | Смягчение |
-|---|---|---|
-| Обновление HyperOS меняет поведение фильтра | Перехват перестанет работать | Проверка `flags` при подключении; диагностика; fallback «выкл» |
-| Система отключает службу | Перехват пропадает | Индикатор состояния в UI; инструкция по включению |
-| Пользователь забыл про перехват | Ctrl+C/V перестают работать в приложениях | Крупный статус, предупреждение, `armed` не сохраняется при старте (D-006), panic tile |
-| Одинаковые мыши | Перехват затронет обе | Предупреждение в UI; привязка по descriptor |
-| «Вперёд» невозможен без root/Shizuku | Не оправданы ожидания | Честный набор действий; Spike S3 |
-| Ошибка парсинга конфига | Потеря управления | Fail-safe: pass + disarm |
-| adb не тестирует перехват | Нет автотестов механизма | Ручной чек-лист на живой мыши |
-
-## 9. Журнал
+## 7. Журнал
 
 | Дата | Событие |
 |---|---|
-| 2026-11-10 | Spike S1 собран и проверен; исправлены 3 дефекта |
-| 2026-11-11 | Spike S2 собран и проверен, все 7 условий приняты |
-| 2026-11-11 | Написан `AGENTS.md` |
-| 2026-11-11 | Написаны `docs/PROJECT_STATUS.md`, `DECISIONS.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `WORKFLOW.md` |
-| 2026-11-11 | Уточнения пользователя: `armed` всегда off, именованные профили в v1, 8 действий, reorg с backup; обновлены D-001/D-005/D-006/D-010/D-011/D-013/D-016/D-018, добавлен D-021 |
-| 2026-11-11 | ADR и архитектура приняты; пакет `com.mousemanager` подтверждён; **M0 отложен на 2026-11-12**; ничего не копировалось/не переносилось, `git init` не выполнялся |
-| 2026-11-11 | Предпусковая проверка M0: структура подтверждена (`.git`/`spikes/`/backup отсутствуют, S1/S2 на местах), уточнения плана приняты — **D-022**; `.gitignore` дополнен; дата начала M0 не назначена; операции M0 не выполнялись |
-| 2026-11-11 | M0 этап 1: резервная копия `MouseManager-backup-20261111-135022`, 67/67 файлов, SHA-256 сверены, APK в `_artifacts/` |
-| 2026-11-11 | M0 этап 2: `git init`, локально `core.autocrlf=false`, baseline commit `ecceb12` — 67 файлов, рабочее дерево чистое |
-| 2026-11-11 | M0 этап 3: S1/S2 скопированы в `spikes/s1`, `spikes/s2` (31+31 файл), источник == копия по SHA-256, 60/60 совпали с манифестом backup |
-| 2026-11-11 | M0 этап 4: `spikes/s1` и `spikes/s2` собираются (`BUILD SUCCESSFUL`); APK S2 бит-в-бит совпал с эталоном, APK S1 отличается только мёртвым padding инкрементальной сборки (D-023) |
-| 2026-11-11 | M0 этап 5: удалены дубликаты из корня (`app/`, `spike-s2/`, 52 отслеживаемых файла); покрытие 22/22 и 30/30 доказано до удаления; 67/67 файлов манифеста сохранены в корне или `spikes/` |
-| 2026-11-11 | M0 этап 6: создан скелет продукта `app/` (`com.mousemanager`, 7 файлов), `:app:assembleDebug` успешен, minSdk 29 / targetSdk 35 / 0.1.0 подтверждены `aapt2` |
-| 2026-11-11 | M0 этап 7: commit «reorg: product root, spikes archived», документация обновлена, **M0 завершён** |
-| — | Следующий шаг — M1 (скелет приложения); реализация не начата |
+| 2026-11-11 | M0 этапы 1–7: backup, baseline `ecceb12`, архив S1/S2, скелет продукта, reorg `d6c72a3`; **M0 завершён** (D-023) |
+| 2026-11-12 | Документация сжата: состояние — здесь, доказательства — `SPIKES.md`, runbook M0 — `archive/` |
+| — | Следующий шаг — M1; реализация не начата |
+
+История M0 по этапам — D-023 и `docs/archive/M0-runbook.md` §3.
