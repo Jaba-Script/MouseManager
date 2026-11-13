@@ -100,15 +100,15 @@ com.mousemanager
 │   ├── Chord.kt                    Chord, ChordKey, маска модификаторов
 │   ├── ActionCode.kt               доступные действия
 │   ├── Verdict.kt                  Pass / Consume / ConsumeAndDispatch
-│   ├── ChordTracker.kt             состояние аккорда: модификаторы, ожидающий UP
-│   ├── RemapEngine.kt              единственное место принятия решения
+│   ├── ChordTracker.kt             состояние аккорда: модификаторы, ожидающий UP (M2)
+│   ├── RemapEngine.kt              единственное место принятия решения (в M1 — заглушка)
 │   └── RuntimeConfig.kt            неизменяемый снимок конфигурации
 │
 ├── service/                        Android-обвязка
 │   ├── MouseManagerService.kt      AccessibilityService, тонкий
 │   ├── KeyEventMapper.kt           KeyEvent → KeyInput
-│   ├── GlobalActionDispatcher.kt   ActionCode → performGlobalAction
-│   ├── CaptureController.kt        «нажмите кнопку» для добавления маппинга
+│   ├── GlobalActionDispatcher.kt   ActionCode → performGlobalAction (M2)
+│   ├── CaptureController.kt        «нажмите кнопку» для добавления маппинга (M2)
 │   └── ServiceState.kt             статус службы (connected, flags) для UI
 │
 ├── data/
@@ -130,16 +130,25 @@ com.mousemanager
 │   └── Decision.kt
 │
 └── ui/
-    ├── App.kt                      экраны и навигация без библиотеки
-    ├── screens/                    Home, Devices, Mappings, Profiles, Diagnostics, About
-    ├── components/                 карточки, диалоги, переключатели
+    ├── App.kt                      Screen, каркас, навигация, передача зависимостей
+    ├── screens/
+    │   ├── HomeScreen.kt           статус службы, неактивный мастер-переключатель
+    │   ├── HomeState.kt            чистое состояние карточки «Настройки»
+    │   ├── DevicesScreen.kt        список устройств и выбор целей
+    │   ├── DevicesState.kt         чистая сборка строк устройств
+    │   ├── DiagnosticsScreen.kt    журнал KeyRecord и очистка
+    │   ├── DiagnosticsState.kt     форматирование времени/metaState, подписи Decision
+    │   └── AboutScreen.kt          версия и ограничения
+    ├── components/
+    │   └── SectionCard.kt          общая карточка раздела
     └── theme/                      Material3, тёмная/светлая тема
 ```
 
 **Правило зависимостей:** `core` не импортирует `android.view.KeyEvent`,
 `android.accessibilityservice.*` и `androidx.datastore.*`. Это позволяет тестировать
 решения на JVM. `service` знает про Android и `core`. `data` знает про DataStore и
-`core`-модели. `ui` знает про `data`, `devices`, `diagnostics`.
+`core`-модели. `ui` знает про `data`, `devices`, `diagnostics` и `service`
+(`ServiceState`); обратных зависимостей нет.
 
 ---
 
@@ -497,7 +506,8 @@ MouseManagerService: config = snapshot   (@Volatile)
 - Все записи — через `SettingsRepository` (suspend-функции).
 - Декодирование — на `Dispatchers.Default`, не на главном.
 - Ошибка декодирования → `ConfigError` в `StateFlow`, `armed=false`, значения по
-  умолчанию. Файл не перезаписывается автоматически: в UI есть «Сбросить настройки».
+  умолчанию. Файл не перезаписывается автоматически. Метод `resetToDefaults()` в
+  `SettingsRepository` существует, но UI его пока не вызывает.
 - `distinctUntilChanged()` по `Settings`, чтобы не перестраивать снимок на каждый чих.
 - `generation++` при каждой публикации.
 
@@ -607,34 +617,62 @@ data class ServiceStatus(
 **Идемпотентность.** `onServiceConnected` может вызываться повторно (переподключение).
 Инициализация репозитория и подписка защищены флагом; трекер сбрасывается.
 
+**Одна служба-фильтр.** В продуктовой конфигурации `FLAG_REQUEST_FILTER_KEY_EVENTS`
+запрашивает только `MouseManagerService`. Вторая Accessibility-служба с этим флагом
+добавляет к доставке клавиш около 500 мс и в продукт не входит (D-025).
+
 ---
 
 ## 12. UI
 
-Одна Activity, Compose, без navigation-compose. Экран — `enum class Screen`, состояние —
-`rememberSaveable`. Системная кнопка «назад» обрабатывается через `BackHandler`
-(возврат на Home).
+Одна Activity (`MainActivity`), Compose, Material3, без `navigation-compose` и без
+ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profiles появятся
+в M2 вместе с API маппингов (D-011); в навигацию S7 они не входят.
 
-| Экран | Содержимое |
-|---|---|
-| **Home** | Статус службы (подключена/нет, флаг принят/нет), мастер-переключатель, активный профиль, краткая сводка маппингов, предупреждение о побочном эффекте |
-| **Devices** | Список мышей: имя, `descriptor` (сокращённо), vendor/product, чекбокс «перехватывать». Неподключённые цели — серым. Предупреждение об одинаковых мышах |
-| **Mappings** | Маппинги активного профиля: аккорд → действие, устройство, вкл/выкл. «Добавить» → режим захвата |
-| **Profiles** | Список профилей, создание/переименование/удаление, выбор активного; привязки приложений (M3) |
-| **Diagnostics** | Журнал решений, статус службы, `appliedFlags`, история `deviceId` по `descriptor`, кнопка «Сбросить журнал» |
-| **About** | Версия, ограничения (нет «вперёд», обычные кнопки не ремапятся), ссылка в настройки специальных возможностей |
+### 12.0 Каркас и навигация
+
+- `MouseManagerUi` — единственный `Scaffold`: `TopAppBar` с заголовком текущего экрана,
+  навигация — `NavigationBar` в `bottomBar` или `NavigationRail` в теле.
+- Экран — `enum class Screen` (`HOME`, `DEVICES`, `DIAGNOSTICS`, `ABOUT`); у каждого
+  элемента `titleRes` (заголовок) и `labelRes` (пункт навигации) из `strings.xml`.
+- Текущий экран — `rememberSaveable { mutableStateOf(Screen.HOME) }`: поворот и
+  пересоздание Activity сохраняют раздел.
+- `BackHandler(enabled = screen != Screen.HOME)` возвращает на Home; на самом Home
+  системная кнопка работает как обычно.
+- Адаптивность: `BoxWithConstraints`, порог `600.dp`. Шире — `NavigationRail` слева,
+  уже — `NavigationBar` снизу. Пункты текстовые (иконок нет, чтобы не добавлять
+  зависимость); порядок задаёт `Screen.entries`.
+- Зависимости передаёт `MainActivity`, взяв их у `MouseManagerApp`: `ConfigStore`,
+  `SettingsRepository`, `DeviceCatalog`, `DiagnosticsLog`. UI не создаёт собственных
+  экземпляров (§9). `ServiceState` — объект-синглтон, Home читает его напрямую.
+- Состояние собирается в composable через `collectAsState()`; записи — из
+  `rememberCoroutineScope`. Собственных `CoroutineScope`/`ViewModel` нет, поэтому
+  корутины живут в композиции и отменяются вместе с ней.
+
+| Экран | Источники данных | Содержимое |
+|---|---|---|
+| **Home** | `ServiceState.status`, `ConfigStore.runtime`/`error` | Статус службы (подключена/нет) и реально применённый фильтр клавиш, кнопка перехода в системные настройки доступности, неактивный мастер-переключатель, сводка: число выбранных устройств и имя активного профиля |
+| **Devices** | `DeviceCatalog.devices`, `ConfigStore.runtime.targets`, `SettingsRepository.setTargets` | Список подключённых мышей и тачпадов (имя, `vendor:product`, сокращённый `descriptor`), сохранённые, но отключённые цели, чекбокс цели; дубликаты `descriptor` склеены в одну строку |
+| **Diagnostics** | `DiagnosticsLog.records`/`clear()` | Журнал `KeyRecord` (новые сверху): время, `Decision`, устройство, клавиша и `scanCode`, DOWN/UP, `metaState`, `isTarget`, `armed`; пустое состояние и очистка |
+| **About** | `BuildConfig.VERSION_NAME` | Назначение приложения, версия, ограничения текущей версии (D-009, D-012, D-014, D-017, D-021) |
+
+Чистые функции состояния (`homeConfigState`, `deviceRows`, `formatRecordTime`,
+`formatMetaState`, `decisionLabelRes`) вынесены из composable и покрыты JVM-тестами.
+Все пользовательские строки — в `strings.xml` (D-019). Общая карточка раздела —
+`ui/components/SectionCard.kt`.
 
 ### 12.1 Мастер-переключатель
 
-- Крупный, с текстом последствий: «Пока перехват включён, Ctrl+C / Ctrl+V от этой мыши
-  не копируют и не вставляют».
-- Тумблер **недоступен**, если служба не подключена или `filterApplied=false`; рядом —
-  причина и ссылка в настройки специальных возможностей.
-- При включении — диалог подтверждения (один раз за сессию).
-- При выключении — мгновенно: `engine.setArmed(false)` + обновление состояния UI.
-- Статус рядом: «служба подключена», «флаг фильтра принят», «цель выбрана».
+В M1 `RemapEngine` — заглушка, `armed` не существует (D-006), поэтому переключатель
+всегда выключен и неактивен (`checked = false`, `enabled = false`,
+`onCheckedChange = null`), рядом — «Будет доступно в M2». Нажатие ничего не меняет и
+настройки не пишет.
 
-### 12.2 Режим захвата аккорда
+В M2 (план): переключатель недоступен, если служба не подключена или
+`filterApplied=false`; при включении — диалог подтверждения, при выключении —
+мгновенно; рядом — статус службы, флага и выбранной цели.
+
+### 12.2 Режим захвата аккорда (M2)
 
 1. Пользователь нажимает «Добавить действие».
 2. `CaptureController` слушает `KeyInput` от целевых устройств (не поглощает).
@@ -692,9 +730,9 @@ data class ServiceStatus(
 
 - Нет разрешения `INTERNET`. Данные не покидают устройство.
 - Нет доступа к содержимому окон (`canRetrieveWindowContent="false"`).
-- Журнал — в памяти, не на диске; очищается при смерти процесса.
-- В release журнал по умолчанию выключен (`diagnostics_enabled=false`), включается
-  вручную.
+- Журнал — всегда в памяти, не на диске; очищается при смерти процесса. В текущей
+  версии служба пишет журнал всегда; переключатель `diagnosticsEnabled` появится
+  в M4.
 - В журнал пишутся коды клавиш и `descriptor`, не текст.
 - `Log.d` — только в debug-сборке.
 - Служба описывает в `accessibility_description`, зачем ей фильтр клавиш.
@@ -736,6 +774,9 @@ data class ServiceStatus(
 ### 16.2 Ручные тесты на устройстве
 
 Механизм фильтра нельзя протестировать через adb (D-002), поэтому чек-лист:
+
+Чек-лист M1/S7 (UI и отсутствие перехвата) — `docs/S7-DEVICE-CHECKLIST.md`.
+Пункты ниже относятся к M2, когда перехват уже работает.
 
 1. Служба включена, `filterApplied=true`.
 2. Цель выбрана, перехват включён.

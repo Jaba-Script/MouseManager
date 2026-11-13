@@ -1,5 +1,96 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Mouse Manager</string>
-    <string name="skeleton_note">Скелет приложения. Перехват кнопок мыши ещё не реализован.</string>
+    <string name="accessibility_label">Mouse Manager</string>
+    <string name="accessibility_description">Показывает нажатия кнопок мыши в диагностическом журнале. В этой версии ничего не перехватывает и не переназначает.</string>
+
+    <!-- Навигация (S7.1, ARCHITECTURE §12). -->
+    <string name="nav_home">Главная</string>
+    <string name="nav_devices">Устройства</string>
+    <string name="nav_diagnostics">Диагностика</string>
+    <string name="nav_about">О программе</string>
+
+    <!-- Заголовки экранов (S7.1). -->
+    <string name="screen_home_title">Главная</string>
+    <string name="screen_devices_title">Устройства</string>
+    <string name="screen_diagnostics_title">Диагностика</string>
+    <string name="screen_about_title">О программе</string>
+
+    <!-- Home: служба доступности (S7.2). -->
+    <string name="home_service_title">Служба доступности</string>
+    <string name="home_service_connection_label">Служба</string>
+    <string name="home_service_connected">Подключена</string>
+    <string name="home_service_disconnected">Не подключена</string>
+    <string name="home_service_filter_label">Фильтр клавиш</string>
+    <string name="home_service_filter_applied">Применён</string>
+    <string name="home_service_filter_missing">Не применён</string>
+    <string name="home_service_note_disconnected">Без службы перехват невозможен. Включите её в системных настройках доступности.</string>
+    <string name="home_service_note_filter_missing">Служба подключена, но система не приняла фильтр клавиш. Перехват невозможен: попробуйте выключить и снова включить службу в настройках доступности.</string>
+    <string name="home_service_note_ready">Служба подключена и фильтр клавиш применён. В этой версии кнопки всё равно не переназначаются.</string>
+    <string name="home_open_accessibility_settings">Открыть настройки доступности</string>
+
+    <!-- Home: мастер-переключатель (S7.2, D-006). -->
+    <string name="home_master_title">Перехват кнопок</string>
+    <string name="home_master_note">Будет доступно в M2</string>
+    <string name="home_master_description">Пока перехват всегда выключен: боковые кнопки мыши работают как обычные Ctrl+C и Ctrl+V.</string>
+
+    <!-- Home: конфигурация (S7.2, D-018). -->
+    <string name="home_config_title">Настройки</string>
+    <string name="home_config_loading">Настройки загружаются…</string>
+    <string name="home_config_error_title">Не удалось загрузить настройки</string>
+    <string name="home_config_error_note">Перезапустите приложение. Пока настройки недоступны, перехват невозможен, но ввод работает как обычно.</string>
+    <string name="home_config_targets_label">Выбрано устройств</string>
+    <string name="home_config_profile_label">Активный профиль</string>
+    <string name="home_config_profile_none">Не выбран</string>
+
+    <!-- Devices: список и выбор целей (S7.3–S7.4). -->
+    <string name="devices_title">Обнаруженные устройства</string>
+    <string name="devices_targets_count">Выбрано: %1$d</string>
+    <string name="devices_note">Выбор сохраняется, но в этой версии кнопки мыши не переназначаются.</string>
+    <string name="devices_empty_title">Устройства не найдены</string>
+    <string name="devices_empty_note">Подключите мышь или тачпад: список обновится автоматически.</string>
+    <string name="devices_connected">Подключено</string>
+    <string name="devices_disconnected">Не подключено</string>
+    <string name="devices_disconnected_note">Устройство отключено. Выбор сохранён и восстановится при повторном подключении.</string>
+    <string name="devices_unknown_name">Устройство без имени</string>
+    <string name="devices_duplicate_hint">Несколько устройств с одинаковым идентификатором: выбор общий.</string>
+    <string name="devices_loading">Настройки загружаются…</string>
+    <string name="devices_config_error">Не удалось загрузить настройки. Перезапустите приложение: пока настройки недоступны, выбор изменить нельзя.</string>
+    <string name="devices_save_error">Не удалось сохранить выбор. Попробуйте ещё раз.</string>
+
+    <!-- Diagnostics: журнал (S7.5, D-017). -->
+    <string name="diagnostics_count">Записей: %1$d · новые сверху</string>
+    <string name="diagnostics_memory_note">Журнал хранится только в памяти процесса и очищается при перезапуске.</string>
+    <string name="diagnostics_clear">Очистить</string>
+    <string name="diagnostics_empty_title">Журнал пуст</string>
+    <string name="diagnostics_empty_note">Нажмите боковую кнопку мыши: события появятся здесь. Записи создаёт служба доступности.</string>
+    <string name="diagnostics_device">%1$s · dev %2$d</string>
+    <string name="diagnostics_device_unknown">Устройство неизвестно</string>
+    <string name="diagnostics_scan">scan: %1$d</string>
+    <string name="diagnostics_direction_down">↓ Нажатие</string>
+    <string name="diagnostics_direction_up">↑ Отпускание</string>
+    <string name="diagnostics_repeat">повтор: %1$d</string>
+    <string name="diagnostics_technical">metaState: %1$s · цель: %2$s · armed: %3$s</string>
+    <string name="diagnostics_yes">да</string>
+    <string name="diagnostics_no">нет</string>
+
+    <!-- Diagnostics: подписи решений (S7.5, D-017). -->
+    <string name="decision_consumed">Поглощено</string>
+    <string name="decision_passed_disarmed">Пропущено: перехват выключен</string>
+    <string name="decision_passed_foreign_device">Пропущено: чужое устройство</string>
+    <string name="decision_passed_modifier">Пропущено: модификатор</string>
+    <string name="decision_passed_no_mapping">Пропущено: нет маппинга</string>
+    <string name="decision_passed_non_hardware">Пропущено: не аппаратное событие</string>
+    <string name="decision_passed_error">Пропущено: ошибка</string>
+    <string name="decision_action_failed">Ошибка выполнения действия</string>
+
+    <!-- About (S7.6). -->
+    <string name="about_description">Приложение для переназначения боковых кнопок физической мыши на системные действия без root-прав.</string>
+    <string name="about_version">Версия %1$s</string>
+    <string name="about_limitations_title">Ограничения текущей версии</string>
+    <string name="about_limitation_no_remap">• Переназначение кнопок пока не реализовано: доступны статус службы, выбор устройств и диагностический журнал.</string>
+    <string name="about_limitation_buttons">• Левая, правая и средняя кнопки мыши не переназначаются и работают как обычно.</string>
+    <string name="about_limitation_forward">• Действие «вперёд» не входит в эту версию.</string>
+    <string name="about_limitation_accessibility">• Для работы потребуется служба доступности; включить её может только пользователь в системных настройках.</string>
+    <string name="about_limitation_journal">• Журнал диагностики хранится только в памяти и очищается при перезапуске приложения.</string>
 </resources>

@@ -61,4 +61,11 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+
+    // Хранилище настроек (D-007). Один DataStore на процесс создаёт MouseManagerApp.
+    implementation("androidx.datastore:datastore-preferences:1.3.0")
+
+    testImplementation("junit:junit:4.13.2")
+    // Только для JVM-тестов кодека: Android подставляет заглушки org.json (D-024).
+    testImplementation("org.json:json:20240303")
 }
