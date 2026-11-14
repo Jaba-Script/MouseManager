@@ -15,8 +15,8 @@
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$src = 'D:\Projects\MouseManager'
-$dst = 'D:\Projects\MouseManager-backup-YYYYMMDD-HHMMSS'
+$src = '<repo>'
+$dst = '<repo-parent>/<repo-name>-backup-YYYYMMDD-HHMMSS'
 $skipDirs  = @('build', '.gradle', '.kotlin', '.idea', '_artifacts')
 $skipNames = @('local.properties', 'README-restore.txt')
 
@@ -89,7 +89,7 @@ foreach ($p in $pairs) {
 Содержание (создаётся вместе с копией, в сверку не входит): фактический путь резервной
 копии и время создания; что скопировано; что не входит (`build/`, `.gradle/`, `.kotlin/`,
 `.idea/`, `local.properties`); как восстановить — скопировать содержимое обратно, создать
-`local.properties` с `sdk.dir=D:\\Android\\Sdk` в корне (и, после M0, в `spikes\\s1`,
+`local.properties` с `sdk.dir=<путь-к-Android-SDK>` в корне (и, после M0, в `spikes\\s1`,
 `spikes\\s2`), сверить файлы с `_manifest-sha256.csv`; кэши не восстанавливаются; APK в
 `_artifacts/` — готовые доказательные артефакты S1/S2.
 

@@ -66,7 +66,7 @@
 | Величина | Значение |
 |---|---|
 | Мышь | `VXE R1SE+ Mouse` |
-| `descriptor` мыши | `ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992` |
+| `descriptor` мыши | `ce5035b0…3992` |
 | История `deviceId` | 19 → 25 → 26/27 → 29 → 30 → 31 (разные сессии) |
 | Scan-коды аккорда | 29 = `KEYCODE_CTRL_LEFT`, 46 = `KEYCODE_C`, 47 = `KEYCODE_V` |
 | `metaState` DOWN / UP | `0x3000` (`META_CTRL_ON | META_CTRL_LEFT_ON`) / `0x0` |

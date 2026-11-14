@@ -152,7 +152,7 @@ class ConfigStoreTest {
     }
 
     private companion object {
-        const val MOUSE_DESCRIPTOR = "ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992"
+        const val MOUSE_DESCRIPTOR = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
         const val KEYCODE_C = 31
         const val KEYCODE_V = 50
     }

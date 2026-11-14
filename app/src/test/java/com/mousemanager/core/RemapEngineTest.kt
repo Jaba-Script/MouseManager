@@ -107,7 +107,7 @@ class RemapEngineTest {
         // META_CTRL_ON | META_CTRL_LEFT_ON, как в измерениях S2 (SPIKES §4).
         const val META_CTRL_LEFT_ON = 0x3000
 
-        // descriptor мыши VXE R1SE+ (SPIKES §4).
-        const val MOUSE_DESCRIPTOR = "ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992"
+        // синтетический descriptor того же формата, что у реального устройства.
+        const val MOUSE_DESCRIPTOR = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
     }
 }

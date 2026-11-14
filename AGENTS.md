@@ -57,16 +57,16 @@ D-006/D-007/D-014 · продукт и UX — D-009/D-010/D-011/D-019/D-020/D-02
 
 ```powershell
 # сборка
-Set-Location D:\Projects\MouseManager; .\gradlew.bat :app:assembleDebug --no-daemon --console=plain
+Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assembleDebug --no-daemon --console=plain
 
 # установка (только с разрешения пользователя)
-& "D:\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
+& "$env:ANDROID_HOME\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
 
 # лог приложения (единый тег)
-& "D:\Android\Sdk\platform-tools\adb.exe" logcat -d -s MouseManager:D
+& "$env:ANDROID_HOME\platform-tools\adb.exe" logcat -d -s MouseManager:D
 
 # скриншот
-& "D:\Android\Sdk\platform-tools\adb.exe" exec-out screencap -p > shot.png
+& "$env:ANDROID_HOME\platform-tools\adb.exe" exec-out screencap -p > shot.png
 ```
 
 Окружение (JDK, SDK, версии, adb) — `PROJECT_STATUS.md` §3. Спайки собираются отдельно

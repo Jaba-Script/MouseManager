@@ -87,7 +87,7 @@ class DevicesStateTest {
     @Test
     fun `short descriptor keeps short values and trims long ones`() {
         assertEquals("abc", shortDescriptor("abc"))
-        assertEquals("ce5035b0…3992", shortDescriptor(DESCRIPTOR))
+        assertEquals("a1b2c3d4…5678", shortDescriptor(DESCRIPTOR))
     }
 
     private fun device(
@@ -105,7 +105,7 @@ class DevicesStateTest {
     )
 
     private companion object {
-        const val DESCRIPTOR = "ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992"
+        const val DESCRIPTOR = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
         const val GONE_DESCRIPTOR = "ffffffffffffffffffffffffffffffffffffffff"
 
         // android.view.InputDevice.SOURCE_MOUSE; JVM-тест не зависит от Android-заглушек.

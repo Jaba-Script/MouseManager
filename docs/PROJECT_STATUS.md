@@ -1,7 +1,7 @@
 # PROJECT_STATUS — Mouse Manager
 
 > Единственный источник истины о состоянии. Обновляется после каждой задачи.
-> Дата: **2026-11-13**.
+> Дата: **2026-11-14**.
 
 ## 1. Кратко
 
@@ -9,7 +9,7 @@
 |---|---|
 | Фаза | **M1 принята** 2026-11-13; M2 не начата |
 | Следующий шаг | **M2 — ядро ремапа и именованные профили** (`ROADMAP.md`). Не начата; старт — по отдельному подтверждению |
-| HEAD | `3078013` «docs: streamline workflow for M1»; изменения S1–S8 не закоммичены |
+| HEAD | `ec05388` «M1: skeleton, UI and device acceptance»; S1–S8 закоммичены |
 | M0 | Завершён 2026-11-11 (этапы 1–7), итоги — D-023 |
 | M1 | **Принята на устройстве 2026-11-13** (S8): 13 PASS, 1 SKIP (физическая клавиатура); S1–S8 завершены (D-024, D-025) |
 | Сборка / тесты | `:app:assembleDebug` и `:app:testDebugUnitTest` проходят; 61 JVM-тест в 9 suites, 0 падений (последняя сборка S7) |
@@ -61,20 +61,20 @@
 | ОС / JDK | Windows, JDK 17 (Temurin 17.0.21); Android Studio нет |
 | Gradle / AGP / Kotlin | wrapper 8.14.6 · AGP 8.13.2 · Kotlin 2.3.21 + compose plugin |
 | Compose / activity | BOM 2026.06.01 · `activity-compose` 1.13.0 |
-| SDK | `D:\Android\Sdk` (platform 36, build-tools 36.1.0); compileSdk 36 / targetSdk 35 / minSdk 29 |
-| adb | `D:\Android\Sdk\platform-tools\adb.exe` |
+| SDK | `$env:ANDROID_HOME` (platform 36, build-tools 36.1.0); compileSdk 36 / targetSdk 35 / minSdk 29 |
+| adb | `$env:ANDROID_HOME\platform-tools\adb.exe` |
 | DataStore | `androidx.datastore:datastore-preferences:1.3.0` (D-020) |
 | JSON в тестах | `org.json:json:20240303`, только `testImplementation` (D-024) |
 | Git | 2.46.0; локально `core.autocrlf=false`; identity `Jaba-Script <178173545+Jaba-Script@users.noreply.github.com>` |
 
 ```powershell
 # сборка продукта
-Set-Location D:\Projects\MouseManager; .\gradlew.bat :app:assembleDebug --no-daemon --console=plain
+Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assembleDebug --no-daemon --console=plain
 # установка — только с разрешения пользователя
-& "D:\Android\Sdk\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
+& "$env:ANDROID_HOME\platform-tools\adb.exe" install -r app\build\outputs\apk\debug\app-debug.apk
 # лог (единый тег) и скриншот
-& "D:\Android\Sdk\platform-tools\adb.exe" logcat -d -s MouseManager:D
-& "D:\Android\Sdk\platform-tools\adb.exe" exec-out screencap -p > shot.png
+& "$env:ANDROID_HOME\platform-tools\adb.exe" logcat -d -s MouseManager:D
+& "$env:ANDROID_HOME\platform-tools\adb.exe" exec-out screencap -p > shot.png
 ```
 
 Спайки собираются отдельно, каждый из своего каталога (`spikes/s1`, `spikes/s2`):
@@ -83,15 +83,15 @@ Set-Location D:\Projects\MouseManager; .\gradlew.bat :app:assembleDebug --no-dae
 ## 4. Структура
 
 ```
-D:\Projects\MouseManager\   ← корень репозитория и проект продукта
+<repo>\   ← корень репозитория и проект продукта
   app\                      ← продукт com.mousemanager: core, data, devices, diagnostics, service, ui
   docs\                     ← документация (вход — AGENTS.md)
   spikes\s1\, spikes\s2\    ← замороженный архив доказательств, отдельные сборки
   gradlew, gradlew.bat, gradle\wrapper\   ← wrapper 8.14.6
-  local.properties          ← sdk.dir=D:/Android/Sdk, не коммитится
+  local.properties          ← sdk.dir=<путь-к-Android-SDK>, не коммитится
 ```
 
-Резервная копия до M0: `D:\Projects\MouseManager-backup-20261111-135022` (67 файлов,
+Резервная копия до M0: `<repo-parent>/<repo-name>-backup-<YYYYMMDD-HHMMSS>` (67 файлов,
 `_manifest-sha256.csv`, APK в `_artifacts/`) — не удаляется.
 
 ## 5. Не проверено и риски

@@ -1,7 +1,7 @@
 # S7 — ручной чек-лист на Xiaomi Pad 6 Pro
 
 Проверка Compose UI после S7 (M1). Чек-лист **выполнен 2026-11-13** на Xiaomi Pad 6 Pro
-(`b4fd8607`), приложение `com.mousemanager` 0.1.0 (versionCode 1), debug. S2 выключена.
+(23046RP50C, liuqin), приложение `com.mousemanager` 0.1.0 (versionCode 1), debug. S2 выключена.
 
 - **Сборка:** `0.1.0` (versionCode 1), debug.
 - **APK:** `app\build\outputs\apk\debug\app-debug.apk`;

@@ -79,7 +79,7 @@ productId`, с явным предупреждением). Это отдельн
 получила 29 → 30 → 31 при неизменном `descriptor`.
 
 **Решение.** Ключ устройства — `descriptor` (стабильная строка, например
-`ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992`). `deviceId` используется только для
+`ce5035b0…3992`). `deviceId` используется только для
 диагностики и логов.
 
 **Следствия.** Две одинаковые мыши одной модели имеют одинаковый `descriptor` и
@@ -260,7 +260,7 @@ kotlinx.serialization и без Room.
   "name": "Основной",
   "mappings": [
     {
-      "device": "ce5035b0dc81cc3d25dbb6f30e5e51d03dcb3992",
+      "device": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
       "chord": { "mods": ["CTRL"], "key": 31 },
       "action": "BACK",
       "enabled": true
@@ -511,7 +511,7 @@ DOWN и UP не ломает аккорд: UP поглощается треке�
 
 **Решение.**
 
-1. **Резервная копия.** Создать `D:\Projects\MouseManager-backup-<YYYYMMDD-HHMMSS>` —
+1. **Резервная копия.** Создать `<repo-parent>/<repo-name>-backup-<YYYYMMDD-HHMMSS>` —
    копию исходников и документации без `build/`, `.gradle/`, `local.properties`. Сверить
    количество файлов и ключевые хэши. Копия остаётся до отдельного подтверждения.
 2. **Git.** `git init`, `.gitignore` (`build/`, `.gradle/`, `local.properties`, `*.apk`,
