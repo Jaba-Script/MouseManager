@@ -286,51 +286,56 @@ override fun onKeyEvent(event: KeyEvent): Boolean {
 fun onKey(input: KeyInput): Verdict {
     val cfg = config                       // @Volatile, без блокировок
     val tracker = tracker
-    tracker.expire(input.eventTime)        // дешёвая проверка pending
+    tracker.expire(input.eventTime)        // pending старше 1500 мс удаляется
 
     // 1. Без descriptor устройство не идентифицировать
     if (input.deviceDescriptor == null) return Pass(NO_DESCRIPTOR)
 
-    // 2. Завершение уже поглощённого аккорда — ДО проверки armed/targets.
-    //    Выключение перехвата или смена целей не должны оставлять половину аккорда.
+    // 2. Парный UP уже поглощённого DOWN — ДО armed/targets/конфига (D-005, D-026)
     if (input.action == ACTION_UP &&
         tracker.consumePending(input.deviceDescriptor, input.keyCode)) {
         return Consume
     }
 
-    // 3. Глобальный выключатель (armed — @Volatile в engine, не из DataStore)
+    // 3. Повторный DOWN/repeat при pending — Consume без dispatch (D-026)
+    if (input.action == ACTION_DOWN &&
+        tracker.refreshPending(input.deviceDescriptor, input.keyCode, input.eventTime)) {
+        return Consume
+    }
+
+    // 4. Глобальный выключатель (armed — @Volatile в engine, не из DataStore)
     if (!armed) {
         tracker.resetModifiers()           // pending не трогаем: он должен дожить до UP
         return Pass(DISARMED)
     }
 
-    // 4. Идентификация устройства
+    // 5. Идентификация устройства
     if (cfg.targets.isEmpty()) return Pass(EMPTY_TARGETS)
     if (input.deviceDescriptor !in cfg.targets) return Pass(FOREIGN_DEVICE)
 
-    // 5. Модификаторы не поглощаем никогда (D-005)
+    // 6. Модификаторы не поглощаем никогда (D-005)
     if (input.keyCode in MODIFIER_KEYCODES) {
         tracker.onModifier(input)          // только отслеживание
         return Pass(MODIFIER)
     }
 
-    // 6. Остальные UP и MULTIPLE пропускаем
+    // 7. Остальные UP и MULTIPLE пропускаем
     if (input.action != ACTION_DOWN) return Pass(KEY_UP)
 
-    // 7. Собираем аккорд
+    // 8. Собираем аккорд
     val chord = ChordKey(
         modsMask = modsOf(input.metaState) or tracker.heldMods(input.deviceDescriptor),
         keyCode = input.keyCode,
     )
 
-    // 8. Ищем маппинг: привязка приложения → активный профиль → default
+    // 9. Ищем маппинг: привязка приложения → активный профиль → default
     val action = cfg.resolve(input.deviceDescriptor, chord, foregroundPackage)
         ?: return Pass(NO_MAPPING)
 
-    // 9. Повтор уже поглощённого триггера не должен стрелять второй раз
-    if (input.repeatCount > 0) return Consume
+    // 10. Repeat без pending не поглощаем: его первый DOWN видело приложение
+    if (input.repeatCount > 0) return Pass(REPEAT_OF_UNKNOWN)
 
-    // 10. Поглощаем DOWN и запоминаем, что нужно поглотить UP
+    // 11. Поглощаем DOWN и запоминаем пару для UP
     tracker.setPending(input.deviceDescriptor, input.keyCode, input.eventTime)
     return ConsumeAndDispatch(action)
 }
@@ -340,8 +345,15 @@ fun onKey(input: KeyInput): Verdict {
 
 - **Никакого I/O, блокировок, JSON, `suspend`.** Только чтение `@Volatile`-ссылки,
   несколько HashMap-поисков и, при необходимости, одна маленькая аллокация.
-- **`descriptor` проверяется первым.** Pending UP — ещё раньше `armed`, чтобы выключение
-  перехвата не оставляло половину аккорда.
+- **`descriptor` проверяется первым.** Парные UP и повторный DOWN проверяются ещё раньше
+  `armed`, чтобы выключение перехвата, смена конфига или удаление устройства из целей не
+  оставляли половину аккорда (D-026).
+- **Повторный DOWN при pending поглощается без dispatch:** один DOWN — не более одного
+  действия.
+- **Repeat без pending проходит как `REPEAT_OF_UNKNOWN`:** мы не поглощаем повтор клавиши,
+  чей первый DOWN не поглощали.
+- **Pending не переживает переподключение службы:** `resetAll()` при connect/unbind;
+  в остальное время — скользящее окно 1500 мс.
 - **Модификаторы только наблюдаются.** Даже если маппинг «Ctrl+C», сам Ctrl система
   получает.
 - **Поглощённый DOWN всегда имеет парный поглощённый UP** — приложение не видит
@@ -358,21 +370,32 @@ fun onKey(input: KeyInput): Verdict {
 class ChordTracker {
     private val heldMods = HashMap<String, Int>()
 
-    // descriptor -> (keyCode -> eventTime)
+    // descriptor -> (keyCode -> время последнего события этой клавиши)
     // Несколько записей: два аккорда могут пересекаться по времени.
     private val pendingUp = HashMap<String, HashMap<Int, Long>>()
+    private var lastExpireTime = 0L
 
     fun onModifier(input: KeyInput)          // set/clear бита по ACTION_DOWN/UP
     fun heldMods(descriptor: String): Int
     fun setPending(descriptor: String, keyCode: Int, time: Long)
 
-    /** true, если UP был ожидаем (свежий pending); запись удаляется. */
+    /** true, если pending был; время обновляется как max(старое, time). */
+    fun refreshPending(descriptor: String, keyCode: Int, time: Long): Boolean
+
+    /** true, если pending был (и не истёк); запись удаляется. */
     fun consumePending(descriptor: String, keyCode: Int): Boolean
 
-    fun expire(now: Long)                    // pending старше 1500 мс удаляется
+    /** true, если для пары есть живой pending; для тестов и диагностики. */
+    fun hasPending(descriptor: String, keyCode: Int): Boolean
+
+    /** Удаляет pending старше PENDING_TIMEOUT_MS; время только вперёд. */
+    fun expire(now: Long)
+
     fun resetModifiers()                     // при disarm: модификаторы забываем
     fun resetAll()                           // при подключении/отключении службы
 }
+
+const val PENDING_TIMEOUT_MS = 1_500L
 ```
 
 Почему нужен `pendingUp`, а не «просто гасить UP по keyCode»: между `C↓` и `C↑` приходит
@@ -384,11 +407,26 @@ class ChordTracker {
 `C↓` и `V↓` могут идти почти одновременно, а их UP — с разным порядком. Одна запись
 перезаписала бы другую, и один UP ушёл бы в приложение сиротой.
 
+**Скользящее окно.** Timeout отсчитывается от последнего события по этой клавише, а не от
+первого DOWN. Иначе при удержании клавиши repeat'ы (каждые ~30–50 мс) пережили бы окно,
+и повторяющаяся буква ушла бы в приложение. `refreshPending` пишет `max(старое, eventTime)`,
+а `expire` ведёт `lastExpireTime = max(now, lastExpireTime)`: пачечная доставка
+(`PROJECT_STATUS.md` §2 п. 13) не может откатить время назад. Абсолютного потолка нет:
+бесконечно продлевать pending можно только бесконечным потоком repeat, то есть на
+неисправном устройстве, где подавление безопаснее утечки.
+
+**Истёкший pending.** Опоздавший UP проходит как `Pass(KEY_UP)`: приложение не видело DOWN,
+«залипания» нет (D-005). Tombstone не вводим — он требует неограниченного состояния и
+может съесть UP новой пары.
+
 `expire` вызывается на каждом событии: проверка нескольких pending (на практике ≤ 4) —
 дешёвая. Если UP потерян (мышь отключилась), ожидание исчезает, ничего не залипает.
 `resetModifiers` при выключении перехвата очищает модификаторы, но **не** pending: уже
 поглощённый DOWN должен получить парный UP. `resetAll` — только при переподключении
 службы, когда события всё равно больше не приходят.
+
+**Поток.** `ChordTracker` используется только с главного потока (`onKeyEvent`,
+`onServiceConnected`, `onUnbind`), поэтому внутри обычные `HashMap` без синхронизации.
 
 ### 6.2 Маска модификаторов
 
@@ -429,7 +467,7 @@ class GlobalActionDispatcher(
             ActionCode.QUICK_SETTINGS -> GLOBAL_ACTION_QUICK_SETTINGS
             ActionCode.POWER_DIALOG -> GLOBAL_ACTION_POWER_DIALOG
             ActionCode.LOCK_SCREEN -> GLOBAL_ACTION_LOCK_SCREEN
-            ActionCode.SCREENSHOT -> GLOBAL_ACTION_SCREENSHOT
+            ActionCode.SCREENSHOT -> GLOBAL_ACTION_TAKE_SCREENSHOT
             ActionCode.NONE -> return true
         }
         return service.performGlobalAction(globalAction)
@@ -439,8 +477,12 @@ class GlobalActionDispatcher(
 
 - Вызывается на главном потоке (так требует `performGlobalAction`).
 - `false` → запись в диагностику, без исключения и без повторной попытки.
-- Для `SCREENSHOT` на API 34+ используется актуальная константа, на 29–33 — старая
-  (детали в D-010).
+- `SCREENSHOT` → `GLOBAL_ACTION_TAKE_SCREENSHOT` (значение 9, API 28; при `minSdk 29`
+  проверка версии не нужна). `takeScreenshot()` (API 30) и `takeScreenshotOfWindow()`
+  (API 34) требуют `canTakeScreenshot`, собственного сохранения bitmap через MediaStore
+  и в v1 не используются: глобальное действие отдаёт снимок системе.
+- Доступность `LOCK_SCREEN`/`SCREENSHOT` на HyperOS не гарантируется: проверка в M2.8,
+  до неё поддержку не обещаем.
 - `ActionDispatcher` — точка расширения: позже можно добавить `ShizukuDispatcher` или
   `IntentDispatcher`, не меняя `RemapEngine`.
 
@@ -614,6 +656,11 @@ data class ServiceStatus(
 `resetDiagnostics()`. Если служба не подключена, `EngineHolder.engine == null`, и UI
 блокирует тумблер.
 
+`MouseManagerApp` остаётся точкой сборки данных (`SettingsRepository`, `ConfigStore`,
+`DeviceCatalog`, `DiagnosticsLog`), но движок не создаёт: владелец — служба.
+`setArmed(false)` вызывается в `onServiceConnected` и `onUnbind`; при `engine == null`
+включить перехват из UI нельзя.
+
 **Идемпотентность.** `onServiceConnected` может вызываться повторно (переподключение).
 Инициализация репозитория и подписка защищены флагом; трекер сбрасывается.
 
@@ -674,14 +721,19 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 
 ### 12.2 Режим захвата аккорда (M2)
 
-1. Пользователь нажимает «Добавить действие».
-2. `CaptureController` слушает `KeyInput` от целевых устройств (не поглощает).
-3. Как только приходит не-модификатор DOWN, фиксируется `Chord` (модификаторы + keyCode).
-4. Диалог: «Найдено: Ctrl+C. Какое действие?» → выбор `ActionCode` → сохранение.
-5. Отмена — ничего не меняется.
+1. Пользователь нажимает «Добавить действие» в Mappings.
+2. `CaptureController` включается только при подключённой службе и живёт на главном потоке.
+3. `MouseManagerService.onKeyEvent` проверяет захват **до** `RemapEngine`: событие целевого
+   устройства передаётся controller'у и возвращается системе (`false`).
+4. Модификаторы игнорируются; первый не-модификатор DOWN фиксирует `Chord`
+   (`modsMask` + `keyCode`).
+5. Диалог: «Найдено: Ctrl+C» → выбор `ActionCode` → сохранение в активный профиль.
+6. Таймаут 10 с и отмена при уходе с экрана; после таймаута захват выключается,
+   событие проходит как обычно.
 
-Во время захвата штатное действие аккорда (копирование/вставка) может сработать. Это
-ожидаемо и написано в подсказке.
+Захват не поглощает событие и не вызывает `ActionDispatcher`: добавление маппинга не
+выполнит действие. Штатное copy/paste во время захвата может сработать — это ожидаемо,
+подсказка в UI.
 
 ---
 
@@ -690,6 +742,7 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 | Контекст | Что делает | Требования |
 |---|---|---|
 | Main (служба) | `onKeyEvent`, `performGlobalAction`, `onAccessibilityEvent` | < 1 мс на событие, без I/O |
+| Main (служба) | `ChordTracker`, `CaptureController` | только этот поток; без блокировок |
 | Default (корутина службы) | сбор DataStore, построение `RuntimeConfig` | может быть медленным |
 | Main (UI) | Compose, клики | без блокировок |
 | Default/IO (репозиторий) | запись DataStore, JSON | вне главного |
@@ -700,6 +753,7 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 - `@Volatile`-ссылка на неизменяемый снимок — единственная синхронизация.
 - Журнал диагностики — тоже `@Volatile`/`StateFlow`, запись не блокирует.
 - `expire()` для pending — O(1).
+- `ChordTracker` и `CaptureController` живут только на главном потоке; синхронизация не нужна.
 
 ---
 
@@ -719,7 +773,11 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 | Смена фокуса/окна | `onKeyEvent` глобальный, действие выполняется на DOWN |
 | Мышь отключилась между DOWN и UP | pending истекает, привязка сохраняется |
 | Мышь вернулась | тот же `descriptor` — работает сразу; другой — выбрать заново |
-| Смена профиля или выключение перехвата между DOWN и UP | UP всё равно гасится |
+| Смена профиля или выключение перехвата между DOWN и UP | UP и повторный DOWN всё равно гасятся (D-026) |
+| Повторный DOWN/repeat при pending | `Consume` без dispatch; время pending обновляется (D-026) |
+| Repeat без pending | `Pass(REPEAT_OF_UNKNOWN)`: повтор не поглощаем |
+| UP после истечения pending | `Pass(KEY_UP)`: сиротский UP безвреден (D-005) |
+| Долгое удержание с repeat | pending продлевается скользящим окном; в приложение ничего не утекает |
 | Исключение в `onKeyEvent` | pass + `armed=false` + запись |
 | Исключение в `performGlobalAction` | `ACTION_FAILED` + Toast, без падения и retry |
 | Падение процесса / перезагрузка / обновление HyperOS | `armed=false`; при регрессии — честный статус |
@@ -756,7 +814,16 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 | C UP после поглощённого DOWN | `Consume` |
 | C UP без DOWN | `Pass(KEY_UP)` |
 | C DOWN без Ctrl | `Pass(NO_MAPPING)` |
-| repeat | `Consume`, без повторного dispatch |
+| repeat при pending | `Consume`, без повторного dispatch |
+| repeat без pending | `Pass(REPEAT_OF_UNKNOWN)` |
+| повторный DOWN (`repeatCount = 0`) при pending | `Consume`, dispatch один (D-026) |
+| серия repeat дольше 1500 мс без UP | pending продлевается, dispatch один |
+| UP после истечения pending | `Pass(KEY_UP)` |
+| `armed=false` + повторный DOWN при pending | `Consume` (D-026) |
+| два устройства с одинаковым keyCode | pending не пересекаются |
+| два keyCode на одном устройстве | оба pending независимы, оба UP гасятся |
+| захват аккорда | событие не доходит до `RemapEngine` и не поглощается |
+| `SCREENSHOT` в маппинге | dispatcher получает `GLOBAL_ACTION_TAKE_SCREENSHOT` (если константа доступна в JVM-тесте) |
 | между C DOWN и C UP пришёл Ctrl UP | pending сохраняется |
 | pending старше 1500 мс | сбрасывается |
 | смена конфига между DOWN и UP | UP всё равно `Consume` |
@@ -794,6 +861,28 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
     Alt, Ctrl+C/Ctrl+V, IME-ввод, аппаратные сочетания. Это **непроверенное условие**:
     VOLUME_UP/DOWN доказывают только фильтрацию по устройству, а не совместимость с
     полноценной клавиатурой.
+14. M2.4: тумблер включается/выключается; без маппингов ничего не гасится; после
+    переподключения службы — `armed=false`.
+15. M2.6: первый маппинг `Ctrl+C → BACK`; «голый Ctrl» — по чек-листу ниже.
+16. Фоновая доставка: другое приложение на переднем плане, нажатие боковой кнопки;
+    зафиксировать `descriptor` и `decision`; повторить после выключения/включения экрана.
+17. Повторный DOWN/repeat на живой мыши: одно действие, нет залипания.
+18. Смена профиля/выключение перехвата во время удержания: нет залипания, нет второго
+    действия.
+19. `LOCK_SCREEN` и `SCREENSHOT` на HyperOS: результат зафиксирован, без обещаний.
+
+**Чек-лист «голого Ctrl» (к пункту 15).**
+
+1. Редактор: боковая кнопка → действие; символ `c` не появился.
+2. Журнал: `Ctrl` — `PASSED_MODIFIER`, `C` — `CONSUMED`, ошибок нет.
+3. После действия — ввод экранной клавиатурой: строчные буквы, выделение, жесты;
+   Ctrl не «залип».
+4. Проверить в браузере, Telegram, Gboard/IME.
+5. Выключить перехват: `Ctrl+C`/`Ctrl+V` работают штатно.
+6. Включить снова: маппинг работает, copy/paste не срабатывает.
+7. Быстро нажать обе боковые кнопки: два действия, без залипания.
+8. Повторить при другом foreground-приложении и после выключения/включения экрана.
+   Физическая клавиатура — SKIP.
 
 ### 16.3 Чего не тестируем автоматически
 
@@ -834,6 +923,13 @@ buildTools 36.1.0, versionName 0.1.0, Java/Kotlin 17, `compose` и `buildConfig`
 2. **Диагностика в release** — выключена по умолчанию; нужен ли экспорт в файл?
 3. **Клавиатура** — когда появится железо, прогнать чек-лист §16.2 п. 13.
 4. **«Вперёд»** — решение по итогам S3 (D-021), не раньше.
+5. **Фоновая доставка клавиш.** `PROJECT_STATUS.md` §2 п. 13: в фоне колбэки приходят
+   пачкой, у отложенных событий `descriptor=null`. Нужно проверить, работает ли ремап при
+   другом foreground-приложении (M2.8); при необходимости — foreground-служба или
+   исключение из оптимизации батареи.
+6. **Диагностические коды для повторных событий.** `PassReason.REPEAT_OF_UNKNOWN` и
+   `KEY_UP` пока не имеют отдельного `Decision`; в M2.3 нужна явная таблица
+   `PassReason → Decision` (см. D-017).
 
 Решено и не обсуждается в v1: `armed` всегда выключается при старте (D-006); именованные
 профили в v1, per-app — M3 (D-011); восемь глобальных действий (D-010); пакет
