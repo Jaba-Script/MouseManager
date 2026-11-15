@@ -9,7 +9,7 @@
 |---|---|
 | Фаза | **M1 принята** 2026-11-13; M2 запланирована (план M2.1–M2.8), реализация не начата |
 | Следующий шаг | **M2.1 — `KeyCodes` и `ChordTracker`**; этапы M2.1–M2.8 — в `ROADMAP.md`; старт — по отдельному подтверждению |
-| HEAD | `4d7f3b7` «merge: preserve GitHub initial commit» (8 коммитов, `main` = `origin/main`); поверх — незакоммиченные правки документации M2.0.3; P3 — `a9a096b` |
+| HEAD | `bbee9c4` «docs: finalize M2 implementation plan» (9 коммитов, `main` впереди `origin/main` на 1); P3 — `a9a096b` |
 | M0 | Завершён 2026-11-11 (этапы 1–7), итоги — D-023 |
 | M1 | **Принята на устройстве 2026-11-13** (S8): 13 PASS, 1 SKIP (физическая клавиатура); S1–S8 завершены (D-024, D-025) |
 | Сборка / тесты | `:app:assembleDebug` и `:app:testDebugUnitTest` проходят; 61 JVM-тест в 9 suites, 0 падений (последняя сборка S7) |
@@ -134,6 +134,7 @@ Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assemble
 | 2026-11-13 | **S8 (S8.2–S8.9)**: ручная приёмка S7 — 13 PASS, 1 SKIP (физическая клавиатура), 0 FAIL; **M1 принята** (`docs/S7-DEVICE-CHECKLIST.md`) |
 | 2026-11-14 | **P3 завершён**: первый публичный коммит `a9a096b` — README, MIT `LICENSE`, `.gitattributes`, дополнен `.gitignore`; из файлов убраны личные данные (синтетический `descriptor` в тестах, без ADB serial, переносимые пути); `gradlew` → `100755`; 61 тест, 0 падений |
 | 2026-11-15 | **M2.0.1–M2.0.3**: план M2 согласован; D-026 принят, уточнены D-005/D-018, исправлены D-001/D-010 (SCREENSHOT); обновлены `ARCHITECTURE.md` (§6, §6.1, §7, §11–§14, §16, §19), `ROADMAP.md` (M2.1–M2.8, оценка 6–9), `AGENTS.md`; код, Gradle и manifest не менялись |
+| 2026-11-15 | **Commit M2.0.3**: `bbee9c4` «docs: finalize M2 implementation plan» — 5 документов, +294/−81; код, Gradle и manifest не менялись |
 | — | Следующий шаг — M2.1 (`KeyCodes`, `ChordTracker`); старт — по отдельному подтверждению |
 
 История M0 по этапам — D-023 и `docs/archive/M0-runbook.md` §3.
