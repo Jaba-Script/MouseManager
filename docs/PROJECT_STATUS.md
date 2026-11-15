@@ -7,12 +7,12 @@
 
 | Параметр | Значение |
 |---|---|
-| Фаза | **M1 принята** 2026-11-13; M2 запланирована (план M2.1–M2.8), реализация не начата |
-| Следующий шаг | **M2.1 — `KeyCodes` и `ChordTracker`**; этапы M2.1–M2.8 — в `ROADMAP.md`; старт — по отдельному подтверждению |
-| HEAD | `6a57486` «docs: update project status after M2.0.3» (текущая вершина `main`); P3 — `a9a096b` |
+| Фаза | **M1 принята** 2026-11-13; **M2.1 завершён** 2026-11-15; M2 выполняется, следующий — M2.2 |
+| Следующий шаг | **M2.2 — `RemapEngine` (порядок §6) и `RuntimeConfig.resolve`**; этапы M2.1–M2.8 — в `ROADMAP.md`; старт — по отдельному подтверждению |
+| HEAD | `9332227` «docs: stabilize project status HEAD reference» (текущая вершина `main`); P3 — `a9a096b` |
 | M0 | Завершён 2026-11-11 (этапы 1–7), итоги — D-023 |
 | M1 | **Принята на устройстве 2026-11-13** (S8): 13 PASS, 1 SKIP (физическая клавиатура); S1–S8 завершены (D-024, D-025) |
-| Сборка / тесты | `:app:assembleDebug` и `:app:testDebugUnitTest` проходят; 61 JVM-тест в 9 suites, 0 падений (последняя сборка S7) |
+| Сборка / тесты | `:app:testDebugUnitTest` — **88 тестов в 11 suites**, 0 failures / 0 errors / 0 skipped (прогон M2.1, 2026-11-15); `:app:assembleDebug` проходил в S7, после M2.1 APK не собирался |
 | UI | 4 экрана S7: Home, Devices, Diagnostics, About; навигация без `navigation-compose` (§12) |
 | Мастер-переключатель | В UI неактивен и выключен до M2; `armed` не хранится и всегда `false` при старте процесса и подключении службы (D-006) |
 | Профили | Именованные + ручное переключение в v1; per-app — M3 (D-011); UI — M2 |
@@ -114,7 +114,7 @@ Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assemble
 
 ## 6. Открытые вопросы
 
-1. **M2** — план согласован (M2.0.1–M2.0.3): этапы M2.1–M2.8 в `ROADMAP.md`, технические уточнения — `ARCHITECTURE.md` §6 и D-026. Реализация не начата; ждёт отдельного подтверждения.
+1. **M2** — выполняется: **M2.1 завершён** 2026-11-15 (`KeyCodes`, `ChordTracker`, 88 тестов); следующий — M2.2 (`RemapEngine`, `RuntimeConfig.resolve`). Этапы M2.1–M2.8 — `ROADMAP.md`, технические уточнения — `ARCHITECTURE.md` §6 и D-026.
 2. **Panic tile** — нужен ли Quick Settings tile для мгновенного отключения (M4)?
 3. **S1/S2 на планшете** — S2 выключена (D-025); оставить как архив или удалить после M1?
 4. **Диагностика в release** — нужен ли экспорт журнала в файл?
@@ -135,6 +135,7 @@ Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assemble
 | 2026-11-14 | **P3 завершён**: первый публичный коммит `a9a096b` — README, MIT `LICENSE`, `.gitattributes`, дополнен `.gitignore`; из файлов убраны личные данные (синтетический `descriptor` в тестах, без ADB serial, переносимые пути); `gradlew` → `100755`; 61 тест, 0 падений |
 | 2026-11-15 | **M2.0.1–M2.0.3**: план M2 согласован; D-026 принят, уточнены D-005/D-018, исправлены D-001/D-010 (SCREENSHOT); обновлены `ARCHITECTURE.md` (§6, §6.1, §7, §11–§14, §16, §19), `ROADMAP.md` (M2.1–M2.8, оценка 6–9), `AGENTS.md`; код, Gradle и manifest не менялись |
 | 2026-11-15 | **Commit M2.0.3**: `bbee9c4` «docs: finalize M2 implementation plan» — 5 документов, +294/−81; код, Gradle и manifest не менялись |
-| — | Следующий шаг — M2.1 (`KeyCodes`, `ChordTracker`); старт — по отдельному подтверждению |
+| 2026-11-15 | **M2.1 завершён**: `core/KeyCodes.kt` (действия, коды модификаторов, `MODIFIER_KEYCODES`, `modsOf`), `core/ChordTracker.kt` (pending `descriptor → keyCode`, скользящее окно 1500 мс, монотонный `expire`, `resetModifiers`/`resetAll`); тесты `KeyCodesTest` (8) и `ChordTrackerTest` (19); `:app:testDebugUnitTest` — **88 тестов в 11 suites, 0 failures / 0 errors / 0 skipped**; служба и `RemapEngine` не тронуты |
+| — | Следующий шаг — M2.2 (`RemapEngine` по §6, `RuntimeConfig.resolve`); старт — по отдельному подтверждению |
 
 История M0 по этапам — D-023 и `docs/archive/M0-runbook.md` §3.
