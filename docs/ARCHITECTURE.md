@@ -107,6 +107,7 @@ com.mousemanager
 │
 ├── service/                        Android-обвязка
 │   ├── MouseManagerService.kt      AccessibilityService, тонкий
+│   ├── EngineHolder.kt             процессная ссылка на RemapEngine (M2.3.3)
 │   ├── KeyEventMapper.kt           KeyEvent → KeyInput
 │   ├── GlobalActionDispatcher.kt   ActionCode → performGlobalAction, rate limit (D-028)
 │   ├── CaptureController.kt        «нажмите кнопку» для добавления маппинга (M2)
@@ -697,15 +698,31 @@ data class ServiceStatus(
 Если когда-нибудь появится `android:process`, потребуется Messenger/AIDL — сейчас не
 нужно.
 
-`RemapEngine` живёт в процессе как синглтон (`EngineHolder`), создаётся службой. UI
-обращается к нему через тонкий `ServiceBridge`: `setArmed(true/false)`, `snapshot()`,
-`resetDiagnostics()`. Если служба не подключена, `EngineHolder.engine == null`, и UI
-блокирует тумблер.
+`EngineHolder` (M2.3.3) — process-wide синглтон в `service/`, хранящий только ссылку
+на текущий `RemapEngine`:
+
+```kotlin
+object EngineHolder {
+    val engine: RemapEngine?          // null — служба не подключена
+    fun attach(engine: RemapEngine)   // последний attach побеждает
+    fun detach(engine: RemapEngine)   // compareAndSet по identity
+}
+```
+
+- Holder не создаёт движок, не хранит `armed`/`config`/`foregroundPackage` и не
+  вызывает `setArmed()`/`resetState()`: единственный источник состояния — `RemapEngine`.
+- `detach` старого экземпляра не снимает новый; повторный `attach` того же экземпляра
+  идемпотентен.
+- `EngineHolder.engine` можно читать из любого потока; сам `RemapEngine` и
+  `ChordTracker` потокобезопасными не становятся (§13).
+- Подключение к службе — M2.3.4: `attach` в `onServiceConnected`, `detach` в
+  `onUnbind`/`onDestroy`. До этого holder существует, но служба его не использует.
 
 `MouseManagerApp` остаётся точкой сборки данных (`SettingsRepository`, `ConfigStore`,
 `DeviceCatalog`, `DiagnosticsLog`), но движок не создаёт: владелец — служба.
-`setArmed(false)` вызывается в `onServiceConnected` и `onUnbind`; при `engine == null`
-включить перехват из UI нельзя.
+В M2.4 UI обратится к движку через `ServiceBridge`; в M2.3.4 `setArmed(false)` будет
+вызываться в `onServiceConnected` и `onUnbind`; при `engine == null` включить перехват
+из UI нельзя.
 
 **Идемпотентность.** `onServiceConnected` может вызываться повторно (переподключение).
 Инициализация репозитория и подписка защищены флагом; трекер сбрасывается.
@@ -847,8 +864,9 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 
 ### 16.1 JVM unit-тесты (основное покрытие)
 
-`RemapEngine`, `ChordTracker` и `GlobalActionDispatcher` не зависят от Android-рантайма
-(у диспетчера Android-обвязка внедряется лямбдами), поэтому тестируются обычным JUnit:
+`RemapEngine`, `ChordTracker`, `GlobalActionDispatcher` и `EngineHolder` не зависят от
+Android-рантайма (у диспетчера Android-обвязка внедряется лямбдами), поэтому
+тестируются обычным JUnit:
 
 | Тест | Ожидание |
 |---|---|
@@ -877,6 +895,10 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 | исключение в `perform` | `dispatch=false`, запись в лог, без retry |
 | rate limit Toast | первый показ при `now=0`; повтор не раньше 2000 мс |
 | исключение в Toast/логгере | не выходит наружу; отметка времени сохраняется |
+| `EngineHolder` без экземпляра | `engine == null`; чтение безопасно |
+| `EngineHolder.attach` | публикует тот же экземпляр; новый заменяет старый; повтор идемпотентен |
+| `EngineHolder.detach` | снимает только текущий; чужой или старый экземпляр не трогает новый |
+| `EngineHolder` и состояние движка | `attach`/`detach` не меняют `armed`, `config`, `foregroundPackage` и pending |
 | между C DOWN и C UP пришёл Ctrl UP | pending сохраняется |
 | pending старше 1500 мс | сбрасывается |
 | смена конфига между DOWN и UP | UP всё равно `Consume` |
