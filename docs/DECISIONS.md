@@ -1114,3 +1114,120 @@ repeat при pending — `Consume`; repeat без pending — `Pass(REPEAT_OF_U
 `ConsumeAndDispatch` (для любого `ActionCode`, включая `NONE`) → `CONSUMED`; ни одна
 причина, кроме `ERROR`, не даёт `PASSED_ERROR`; `PASSED_NON_HARDWARE` не производится;
 `Decision.entries.size == 12`; у всех двенадцати есть уникальная подпись.
+
+---
+
+## D-028 — Диспетчер действий M2.3.2: контракт в `core`, лямбда-инъекция и rate limit
+
+**Статус:** Accepted (подтверждено пользователем 2026-11-16, M2.3.2)
+
+**Контекст.** D-010 требует `ActionDispatcher` и `GlobalActionDispatcher`, а ARCHITECTURE §7
+показывал конструктор с прямой ссылкой на `AccessibilityService`. Вызов
+`performGlobalAction` нельзя выполнить в обычном JVM-тесте без Robolectric, а проект
+держит основное покрытие на JUnit (§16.1). Кроме того, §7 не описывал rate limit
+Toast и защиту от исключений, хотя D-010 и D-018 их требуют.
+
+**Решение.**
+
+28.1. `ActionDispatcher` — интерфейс в `core`, без Android-зависимостей:
+
+```kotlin
+interface ActionDispatcher {
+    fun dispatch(action: ActionCode): Boolean
+}
+```
+
+`true` — действие выполнено или это намеренный no-op (`NONE`); `false` — отказ.
+Реализация не бросает исключений наружу и не повторяет действие.
+
+28.2. `GlobalActionDispatcher` — в `service`. Зависимости от Android внедряются лямбдами,
+а не передачей `AccessibilityService`:
+
+```kotlin
+class GlobalActionDispatcher(
+    private val perform: (Int) -> Boolean,
+    private val notifyFailure: () -> Unit,
+    private val now: () -> Long = { SystemClock.elapsedRealtime() },
+    private val logFailure: (Throwable) -> Unit = {},
+) : ActionDispatcher
+```
+
+В продукте служба передаёт `{ performGlobalAction(it) }`, `Toast` и `Log.e`; в тестах —
+счётчики и управляемое время. Robolectric не нужен.
+
+28.3. Маппинг реализуется `internal fun globalActionFor(action: ActionCode): Int?` с
+исчерпывающим `when` без `else`:
+
+| `ActionCode` | Константа | Значение |
+|---|---|---:|
+| `BACK` | `GLOBAL_ACTION_BACK` | 1 |
+| `HOME` | `GLOBAL_ACTION_HOME` | 2 |
+| `RECENTS` | `GLOBAL_ACTION_RECENTS` | 3 |
+| `NOTIFICATIONS` | `GLOBAL_ACTION_NOTIFICATIONS` | 4 |
+| `QUICK_SETTINGS` | `GLOBAL_ACTION_QUICK_SETTINGS` | 5 |
+| `POWER_DIALOG` | `GLOBAL_ACTION_POWER_DIALOG` | 6 |
+| `LOCK_SCREEN` | `GLOBAL_ACTION_LOCK_SCREEN` | 8 |
+| `SCREENSHOT` | `GLOBAL_ACTION_TAKE_SCREENSHOT` | 9 |
+| `NONE` | — | — |
+
+28.4. `NONE` → `globalActionFor == null` → `dispatch` возвращает `true` без вызова
+системного API, без Toast и без записи об ошибке. Это валидный маппинг (D-007), а не сбой.
+
+28.5. `false` или исключение из `perform` → `dispatch` возвращает `false`, не повторяет
+вызов, не выпускает исключение наружу и передаёт причину в `logFailure`. Запись
+`ACTION_FAILED` и Toast — обязанность службы (M2.3.4): у диспетчера нет полей события, а
+исходный `CONSUMED` должен сохраниться (D-027 п. 27.3).
+
+28.6. Rate limit сообщения — 2000 мс. Поле `lastFailureNotifiedAt: Long? = null`
+гарантирует первый Toast даже при `now() == 0`; дальше сообщение показывается только при
+`current - last >= 2000`. Отметка ставится **до** вызова `notifyFailure`, поэтому
+исключение в Toast не приводит к повторному показу в том же окне. Успешное действие
+таймер не сбрасывает.
+
+28.7. Исключения `notifyFailure` и `logFailure` перехватываются и не выходят наружу:
+диагностика вторична по отношению к вводу.
+
+28.8. Перехватывается `Exception`, а не `Throwable`: критические ошибки JVM (`Error`,
+`OutOfMemoryError`) не маскируются. Это осознанное отличие от общего `catch (Throwable)`
+в `MouseManagerService.onKeyEvent`.
+
+28.9. Диспетчер вызывается только с главного потока (`performGlobalAction` требует main
+thread) и не потокобезопасен; это зафиксировано в KDoc.
+
+**Обоснование.**
+
+- Лямбда-инъекция — единственный способ покрыть логику обычным JUnit: сам
+  `AccessibilityService` в JVM-тесте не создать, а `performGlobalAction` не выполнить.
+- Диспетчер не должен владеть жизненным циклом службы: `perform` — узкая зависимость,
+  которую в M2.3.4 заменит bound-ссылка на `performGlobalAction`.
+- Разделение с D-027: диспетчер отвечает только за выполнение, служба — за журнал и
+  Toast. Иначе пришлось бы передавать в диспетчер `KeyRecord`, смешивая слои.
+- Sentinel `null` — единственный способ отличить «сообщений ещё не было» от
+  `elapsedRealtime() == 0`.
+- Отметка времени до уведомления защищает от спама, если Toast бросает исключение.
+
+**Совместимость.**
+
+- D-010: набор из восьми действий, обработка `false`/исключения, rate limit и отсутствие
+  retry сохраняются; меняется только способ внедрения зависимости.
+- D-018 §18.7: отказ действия не роняет приложение и не блокирует ввод.
+- D-027 п. 27.3: `CONSUMED` сохраняется, `ACTION_FAILED` добавляет служба.
+- ARCHITECTURE §7 приведён к фактическому конструктору; §4, §16.1 и §19 обновлены.
+- `RemapEngine`, `RuntimeConfig`, `ChordTracker` и служба не изменяются; подключение —
+  M2.3.4. Текст Toast и `strings.xml` — тоже M2.3.4.
+- Новых зависимостей и Robolectric нет.
+
+**Следствия.**
+
+- `core/ActionDispatcher.kt` — новый интерфейс.
+- `service/GlobalActionDispatcher.kt` — маппинг, `dispatch`, rate limit, защита исключений.
+- `service/GlobalActionDispatcherTest.kt` — 16 JVM-тестов.
+- Общий прогон: **154 теста в 14 suites**, 0 failures / 0 errors / 0 skipped.
+- В M2.3.4 служба собирает диспетчер, пишет `ACTION_FAILED` и показывает Toast.
+
+**Проверки (JVM).** Все девять `ActionCode` покрыты; восемь действий дают корректные
+`GLOBAL_ACTION_*`; `NONE` — единственное `null` и успешный no-op без `perform`/Toast;
+успех вызывает `perform` один раз; `false` и исключение дают `false` без retry; первый
+отказ уведомляет при `now = 0`; 1999 мс подавляют повтор, 2000 мс разрешают; успех не
+сбрасывает таймер; исключения `notifyFailure`/`logFailure` не выходят наружу; отметка
+времени сохраняется при неудачном Toast.

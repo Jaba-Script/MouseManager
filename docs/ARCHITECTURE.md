@@ -99,6 +99,7 @@ com.mousemanager
 │   ├── KeyInput.kt                 immutable-событие (keyCode, action, metaState, descriptor…)
 │   ├── Chord.kt                    Chord, ChordKey, маска модификаторов
 │   ├── ActionCode.kt               доступные действия
+│   ├── ActionDispatcher.kt         контракт выполнения действия (D-028)
 │   ├── Verdict.kt                  Pass / Consume / ConsumeAndDispatch
 │   ├── ChordTracker.kt             состояние аккорда: модификаторы, ожидающий UP (M2)
 │   ├── RemapEngine.kt              единственное место принятия решения (в M1 — заглушка)
@@ -107,7 +108,7 @@ com.mousemanager
 ├── service/                        Android-обвязка
 │   ├── MouseManagerService.kt      AccessibilityService, тонкий
 │   ├── KeyEventMapper.kt           KeyEvent → KeyInput
-│   ├── GlobalActionDispatcher.kt   ActionCode → performGlobalAction (M2)
+│   ├── GlobalActionDispatcher.kt   ActionCode → performGlobalAction, rate limit (D-028)
 │   ├── CaptureController.kt        «нажмите кнопку» для добавления маппинга (M2)
 │   └── ServiceState.kt             статус службы (connected, flags) для UI
 │
@@ -455,28 +456,73 @@ interface ActionDispatcher {
 }
 
 class GlobalActionDispatcher(
-    private val service: AccessibilityService,
+    private val perform: (Int) -> Boolean,
+    private val notifyFailure: () -> Unit,
+    private val now: () -> Long = { SystemClock.elapsedRealtime() },
+    private val logFailure: (Throwable) -> Unit = {},
 ) : ActionDispatcher {
 
+    private var lastFailureNotifiedAt: Long? = null
+
     override fun dispatch(action: ActionCode): Boolean {
-        val globalAction = when (action) {
-            ActionCode.BACK -> GLOBAL_ACTION_BACK
-            ActionCode.HOME -> GLOBAL_ACTION_HOME
-            ActionCode.RECENTS -> GLOBAL_ACTION_RECENTS
-            ActionCode.NOTIFICATIONS -> GLOBAL_ACTION_NOTIFICATIONS
-            ActionCode.QUICK_SETTINGS -> GLOBAL_ACTION_QUICK_SETTINGS
-            ActionCode.POWER_DIALOG -> GLOBAL_ACTION_POWER_DIALOG
-            ActionCode.LOCK_SCREEN -> GLOBAL_ACTION_LOCK_SCREEN
-            ActionCode.SCREENSHOT -> GLOBAL_ACTION_TAKE_SCREENSHOT
-            ActionCode.NONE -> return true
+        val globalAction = globalActionFor(action) ?: return true
+        val performed = try {
+            perform(globalAction)
+        } catch (e: Exception) {
+            logSafely(e)
+            false
         }
-        return service.performGlobalAction(globalAction)
+        if (!performed) notifyFailureOnce()
+        return performed
     }
+
+    private fun notifyFailureOnce() {
+        val current = now()
+        val last = lastFailureNotifiedAt
+        if (last != null && current - last < FAILURE_NOTIFY_INTERVAL_MS) return
+        lastFailureNotifiedAt = current
+        try {
+            notifyFailure()
+        } catch (e: Exception) {
+            logSafely(e)
+        }
+    }
+
+    private fun logSafely(error: Throwable) {
+        try {
+            logFailure(error)
+        } catch (ignored: Exception) {
+            // Диагностика не должна ломать горячий путь.
+        }
+    }
+}
+
+internal fun globalActionFor(action: ActionCode): Int? = when (action) {
+    ActionCode.BACK -> AccessibilityService.GLOBAL_ACTION_BACK
+    ActionCode.HOME -> AccessibilityService.GLOBAL_ACTION_HOME
+    ActionCode.RECENTS -> AccessibilityService.GLOBAL_ACTION_RECENTS
+    ActionCode.NOTIFICATIONS -> AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS
+    ActionCode.QUICK_SETTINGS -> AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
+    ActionCode.POWER_DIALOG -> AccessibilityService.GLOBAL_ACTION_POWER_DIALOG
+    ActionCode.LOCK_SCREEN -> AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+    ActionCode.SCREENSHOT -> AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT
+    ActionCode.NONE -> null
 }
 ```
 
-- Вызывается на главном потоке (так требует `performGlobalAction`).
-- `false` → запись в диагностику, без исключения и без повторной попытки.
+- `ActionDispatcher` — интерфейс в `core`, `GlobalActionDispatcher` — в `service`. Android-обвязка
+  (`perform`, `notifyFailure`, `now`, `logFailure`) внедряется лямбдами, поэтому логика
+  тестируется обычным JUnit без Robolectric (D-028).
+- Вызывается на главном потоке (так требует `performGlobalAction`); экземпляр не
+  потокобезопасен.
+- `NONE` → `globalActionFor == null` → `true`: системный API и Toast не вызываются.
+- `false` или исключение → `dispatch` возвращает `false`, без исключения наружу и без
+  повторной попытки. `logFailure` получает причину; запись `ACTION_FAILED` и Toast делает
+  служба в M2.3.4, сохраняя исходный `CONSUMED` (D-027 п. 27.3).
+- Rate limit: `lastFailureNotifiedAt: Long? = null` гарантирует первый Toast даже при
+  `now() == 0`; дальше — не чаще одного раза в 2000 мс. Отметка ставится **до** вызова
+  `notifyFailure`, поэтому исключение в Toast не приводит к повторному показу. Исключения
+  `notifyFailure`/`logFailure` перехватываются как `Exception` и не выходят наружу.
 - `SCREENSHOT` → `GLOBAL_ACTION_TAKE_SCREENSHOT` (значение 9, API 28; при `minSdk 29`
   проверка версии не нужна). `takeScreenshot()` (API 30) и `takeScreenshotOfWindow()`
   (API 34) требуют `canTakeScreenshot`, собственного сохранения bitmap через MediaStore
@@ -801,7 +847,8 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 
 ### 16.1 JVM unit-тесты (основное покрытие)
 
-`RemapEngine` и `ChordTracker` не зависят от Android, поэтому тестируются обычным JUnit:
+`RemapEngine`, `ChordTracker` и `GlobalActionDispatcher` не зависят от Android-рантайма
+(у диспетчера Android-обвязка внедряется лямбдами), поэтому тестируются обычным JUnit:
 
 | Тест | Ожидание |
 |---|---|
@@ -823,7 +870,13 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 | два устройства с одинаковым keyCode | pending не пересекаются |
 | два keyCode на одном устройстве | оба pending независимы, оба UP гасятся |
 | захват аккорда | событие не доходит до `RemapEngine` и не поглощается |
-| `SCREENSHOT` в маппинге | dispatcher получает `GLOBAL_ACTION_TAKE_SCREENSHOT` (если константа доступна в JVM-тесте) |
+| `SCREENSHOT` в маппинге | dispatcher получает `GLOBAL_ACTION_TAKE_SCREENSHOT` (константа встраивается, Robolectric не нужен) |
+| `ActionCode` → `GLOBAL_ACTION_*` | все восемь значений совпадают с константами `AccessibilityService` |
+| `NONE` в `dispatch` | `true` без `perform` и без Toast |
+| `performGlobalAction` вернул `false` | `dispatch=false`, одно уведомление, без retry |
+| исключение в `perform` | `dispatch=false`, запись в лог, без retry |
+| rate limit Toast | первый показ при `now=0`; повтор не раньше 2000 мс |
+| исключение в Toast/логгере | не выходит наружу; отметка времени сохраняется |
 | между C DOWN и C UP пришёл Ctrl UP | pending сохраняется |
 | pending старше 1500 мс | сбрасывается |
 | смена конфига между DOWN и UP | UP всё равно `Consume` |
@@ -927,9 +980,9 @@ buildTools 36.1.0, versionName 0.1.0, Java/Kotlin 17, `compose` и `buildConfig`
    пачкой, у отложенных событий `descriptor=null`. Нужно проверить, работает ли ремап при
    другом foreground-приложении (M2.8); при необходимости — foreground-служба или
    исключение из оптимизации батареи.
-6. **Диагностические коды для повторных событий.** `PassReason.REPEAT_OF_UNKNOWN` и
-   `KEY_UP` пока не имеют отдельного `Decision`; в M2.3 нужна явная таблица
-   `PassReason → Decision` (см. D-017).
+6. **Диагностические коды для повторных событий** — закрыто в D-027: у всех девяти
+   `PassReason` есть отдельный `Decision`, включая `PASSED_KEY_UP` и `PASSED_REPEAT`;
+   `PASSED_NON_HARDWARE` остаётся резервом.
 
 Решено и не обсуждается в v1: `armed` всегда выключается при старте (D-006); именованные
 профили в v1, per-app — M3 (D-011); восемь глобальных действий (D-010); пакет
