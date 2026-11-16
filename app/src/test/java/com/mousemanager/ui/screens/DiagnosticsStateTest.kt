@@ -9,7 +9,7 @@ import java.time.ZoneId
 
 /**
  * Форматирование журнала Diagnostics (S7.5): время, `metaState` и подписи всех
- * восьми [Decision]. Тест чистый, Android-устройство не нужно.
+ * двенадцати [Decision] (D-017, D-027). Тест чистый, Android-устройство не нужно.
  */
 class DiagnosticsStateTest {
 
@@ -30,7 +30,7 @@ class DiagnosticsStateTest {
     fun `every decision has its own label`() {
         val labels = Decision.entries.map { decisionLabelRes(it) }
 
-        assertEquals(8, Decision.entries.size)
+        assertEquals(12, Decision.entries.size)
         assertEquals(Decision.entries.size, labels.distinct().size)
         labels.forEach { assertNotEquals(0, it) }
     }
@@ -38,6 +38,10 @@ class DiagnosticsStateTest {
     @Test
     fun `expected resources are used for sample decisions`() {
         assertEquals(R.string.decision_passed_disarmed, decisionLabelRes(Decision.PASSED_DISARMED))
+        assertEquals(R.string.decision_passed_no_descriptor, decisionLabelRes(Decision.PASSED_NO_DESCRIPTOR))
+        assertEquals(R.string.decision_passed_no_targets, decisionLabelRes(Decision.PASSED_NO_TARGETS))
+        assertEquals(R.string.decision_passed_key_up, decisionLabelRes(Decision.PASSED_KEY_UP))
+        assertEquals(R.string.decision_passed_repeat, decisionLabelRes(Decision.PASSED_REPEAT))
         assertEquals(R.string.decision_action_failed, decisionLabelRes(Decision.ACTION_FAILED))
     }
 }

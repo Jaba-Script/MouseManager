@@ -74,12 +74,16 @@
     <string name="diagnostics_yes">да</string>
     <string name="diagnostics_no">нет</string>
 
-    <!-- Diagnostics: подписи решений (S7.5, D-017). -->
+    <!-- Diagnostics: подписи решений (S7.5, D-017, D-027). -->
     <string name="decision_consumed">Поглощено</string>
     <string name="decision_passed_disarmed">Пропущено: перехват выключен</string>
+    <string name="decision_passed_no_descriptor">Пропущено: устройство не определено</string>
+    <string name="decision_passed_no_targets">Пропущено: устройства не выбраны</string>
     <string name="decision_passed_foreign_device">Пропущено: чужое устройство</string>
     <string name="decision_passed_modifier">Пропущено: модификатор</string>
+    <string name="decision_passed_key_up">Пропущено: отпускание клавиши</string>
     <string name="decision_passed_no_mapping">Пропущено: нет маппинга</string>
+    <string name="decision_passed_repeat">Пропущено: повторное нажатие</string>
     <string name="decision_passed_non_hardware">Пропущено: не аппаратное событие</string>
     <string name="decision_passed_error">Пропущено: ошибка</string>
     <string name="decision_action_failed">Ошибка выполнения действия</string>

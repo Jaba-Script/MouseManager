@@ -1027,3 +1027,90 @@ repeat при pending — `Consume`; repeat без pending — `Pass(REPEAT_OF_U
 истечения — `Pass(KEY_UP)`; `armed=false` между DOWN и UP/repeat — оба `Consume`;
 смена конфига и удаление из `targets` — UP `Consume`; два keyCode и два descriptor —
 независимые pending; серия repeat дольше 1500 мс — один dispatch.
+
+---
+
+## D-027 — Диагностика M2.3: коды `PassReason → Decision` и `armed` на момент решения
+
+**Статус:** Accepted (подтверждено пользователем 2026-11-16, M2.3.1)
+
+**Контекст.** M2.2 добавил `RemapEngine` с девятью `PassReason`, но журнал
+(`MouseManagerService.decisionFor`, строки 164–169) отображал в `PASSED_DISARMED` только
+`DISARMED`, а все остальные `Pass` — в `PASSED_ERROR`. Пока `armed` был константой
+`false`, это не проявлялось; после интеграции службы (M2.3) журнал начал бы показывать
+ошибку для штатных пропусков (`KEY_UP`, `MODIFIER`, `FOREIGN_DEVICE`,
+`REPEAT_OF_UNKNOWN` и других). D-017 перечисляет семь кодов и не описывает ни парные, ни
+повторные события; ARCHITECTURE §19 п. 6 оставлял это открытым вопросом.
+
+**Решение.**
+
+27.1. Таблица соответствия — единственная:
+
+| Вердикт | Причина | `Decision` |
+|---|---|---|
+| `Pass` | `DISARMED` | `PASSED_DISARMED` |
+| `Pass` | `NO_DESCRIPTOR` | `PASSED_NO_DESCRIPTOR` (новый) |
+| `Pass` | `EMPTY_TARGETS` | `PASSED_NO_TARGETS` (новый) |
+| `Pass` | `FOREIGN_DEVICE` | `PASSED_FOREIGN_DEVICE` |
+| `Pass` | `MODIFIER` | `PASSED_MODIFIER` |
+| `Pass` | `KEY_UP` | `PASSED_KEY_UP` (новый) |
+| `Pass` | `NO_MAPPING` | `PASSED_NO_MAPPING` |
+| `Pass` | `REPEAT_OF_UNKNOWN` | `PASSED_REPEAT` (новый) |
+| `Pass` | `ERROR` | `PASSED_ERROR` |
+| `Consume` | — | `CONSUMED` |
+| `ConsumeAndDispatch` | — | `CONSUMED` |
+| исключение в `onKeyEvent` | — | `PASSED_ERROR` |
+
+27.2. `PASSED_NON_HARDWARE` сохраняется в enum, но в v1 не производится: это резерв для
+событий, не связанных с аппаратным устройством (захват аккорда, синтетические события).
+Удалять его нельзя: D-017 и UI уже содержат код, а пользы от удаления нет.
+
+27.3. Ошибка диспетчера фиксируется **двумя** записями с одинаковыми полями события:
+`CONSUMED` (клавиша поглощена) и `ACTION_FAILED` (действие не выполнилось).
+`ACTION_FAILED` не заменяет `CONSUMED`: журнал должен показывать и факт поглощения, и
+факт отказа.
+
+27.4. `armed` в `KeyRecord` — значение, прочитанное **до** вызова `engine.onKey`. Все
+записи `armed` выполняются на главном потоке (включая fail-safe disarm при
+`generation == 0` через `Handler(Looper.getMainLooper())`), поэтому в пределах одного
+`onKeyEvent` состояние измениться не может и журнал не расходится с решением.
+
+27.5. Маппинг реализуется чистой функцией `diagnostics/DecisionMapper.kt`; `when` по
+`PassReason` написан без `else`, чтобы новое значение ломало компиляцию, а не попадало в
+`PASSED_ERROR`.
+
+**Обоснование.**
+
+- Коды должны отвечать на вопрос «почему не сработало», а не «что-то пошло не так»:
+  `PASSED_NO_TARGETS` (нет выбранных мышей) и `PASSED_FOREIGN_DEVICE` (устройство не в
+  целях) — разные действия пользователя.
+- `PASSED_NO_DESCRIPTOR` отделён от `PASSED_NON_HARDWARE`: `descriptor == null` бывает у
+  реальной мыши после отключения или при отложенной фоновой доставке
+  (`PROJECT_STATUS.md` §2 п. 13), и называть это «не аппаратным событием» неверно.
+- Диагностика парных событий нужна для проверки D-026: без `PASSED_KEY_UP` и
+  `PASSED_REPEAT` невозможно отличить штатный сиротский UP от ошибки.
+- Одно чтение `armed` до `onKey` — единственный способ гарантировать согласованность без
+  изменения API `RemapEngine` (M2.3 его не меняет).
+
+**Совместимость.**
+
+- D-017: список расширяется аддитивно; переименований и удалений нет. Семь исходных
+  кодов сохраняют имена.
+- D-026: правило «повторный DOWN при pending → `CONSUMED`, отдельный `Decision` не
+  вводится» сохраняется; `PASSED_REPEAT` относится только к repeat **без** pending.
+- S2 заморожен и имеет собственный enum — не затрагивается.
+- Порядок значений enum нигде не сохраняется: журнал живёт только в памяти (D-017).
+
+**Следствия.**
+
+- `diagnostics/Decision.kt`: четыре новых значения, обновлён KDoc.
+- `diagnostics/DecisionMapper.kt`: новый файл, единственное место маппинга.
+- `ui/screens/DiagnosticsState.kt`: четыре новые подписи; `strings.xml` — четыре строки.
+- `DiagnosticsStateTest`, `DiagnosticsLogTest`: двенадцать значений.
+- ARCHITECTURE §19 п. 6 закрывается; §16.1 дополняется тестами маппера (M2.3.6).
+- Подключение маппера к службе — M2.3.4; в M2.3.1 поведение продукта не меняется.
+
+**Проверки (JVM).** Каждая из девяти `PassReason` даёт свой `Decision`; `Consume` и
+`ConsumeAndDispatch` (для любого `ActionCode`, включая `NONE`) → `CONSUMED`; ни одна
+причина, кроме `ERROR`, не даёт `PASSED_ERROR`; `PASSED_NON_HARDWARE` не производится;
+`Decision.entries.size == 12`; у всех двенадцати есть уникальная подпись.

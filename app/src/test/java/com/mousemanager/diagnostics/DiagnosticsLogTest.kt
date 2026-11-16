@@ -61,21 +61,25 @@ class DiagnosticsLogTest {
     }
 
     @Test
-    fun `decision has eight stable values`() {
+    fun `decision has twelve stable values`() {
         assertEquals(
             listOf(
                 "CONSUMED",
                 "PASSED_DISARMED",
+                "PASSED_NO_DESCRIPTOR",
+                "PASSED_NO_TARGETS",
                 "PASSED_FOREIGN_DEVICE",
                 "PASSED_MODIFIER",
+                "PASSED_KEY_UP",
                 "PASSED_NO_MAPPING",
+                "PASSED_REPEAT",
                 "PASSED_NON_HARDWARE",
                 "PASSED_ERROR",
                 "ACTION_FAILED",
             ),
             Decision.entries.map { it.name },
         )
-        assertEquals(8, Decision.entries.size)
+        assertEquals(12, Decision.entries.size)
     }
 
     @Test
