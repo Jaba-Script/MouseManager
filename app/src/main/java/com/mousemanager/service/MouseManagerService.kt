@@ -31,9 +31,11 @@ import kotlinx.coroutines.launch
  * Служба остаётся тонкой: разбор `KeyEvent` и lifecycle — здесь, обработка одного
  * события — в [KeyEventHandler]. Сам движок ничего не знает про Android.
  *
- * **`armed` всегда `false`.** Мастер-переключатель появится в M2.4 (D-006), поэтому
- * до него служба не поглощает клавиши и не выполняет действия: поведение продукта
- * совпадает с M1. Интеграция проверяется JVM-тестами `KeyEventHandler`.
+ * **`armed`.** Служба никогда не включает перехват сама: каждое подключение и
+ * завершение сессии начинается с `armed = false` (D-006). Включение возможно только
+ * через [ServiceBridge], который проверяет гейт и синхронно обновляет зеркало
+ * [ServiceState] (D-031). Пока мастер-переключатель не подключён к UI, `armed` всегда
+ * `false`, и поведение продукта совпадает с M1.
  *
  * **Конфигурация.** Единственный источник — [RemapEngine.config]. Начальный
  * [RuntimeConfig.EMPTY] (`generation == 0`) — ещё не конфиг пользователя, поэтому при
@@ -41,14 +43,16 @@ import kotlinx.coroutines.launch
  *
  * **Сессия.** Конфиг применяется только текущей сессией наблюдения: `configSession`
  * увеличивается при старте и завершении сессии, а все записи `engine.config` и
- * планирование disarm выполняются на главном потоке с проверкой токена. Поэтому
- * отменённый, но ещё не завершившийся сборщик не может записать устаревший снимок
- * или выключить перехват после `onUnbind`/`onDestroy`.
+ * планирование disarm выполняются на главном потоке с проверкой токена. Отменённый,
+ * но ещё не завершившийся сборщик не может записать устаревший снимок; отложенный
+ * `disarmIfEmpty` помнит токен своей сессии и не выключает перехват новой
+ * ([DisarmGuard], D-031 п. 31.11).
  *
- * **Жизненный цикл.** `onServiceConnected` всегда начинает с `armed = false`,
- * сбрасывает трекер, `config = EMPTY` и `foregroundPackage = null`, затем публикует
- * движок через [EngineHolder]. `onUnbind` снимает сессию (включая сброс config и
- * foreground), но не отменяет общий scope; `onDestroy` снимает сессию и отменяет scope.
+ * **Жизненный цикл.** `onServiceConnected` всегда начинает с `armed = false` через
+ * мост, сбрасывает трекер, `config = EMPTY` и `foregroundPackage = null`, затем
+ * публикует движок через [EngineHolder]. `onUnbind` снимает сессию (включая сброс
+ * config, foreground и зеркала `armed`), но не отменяет общий scope; `onDestroy`
+ * снимает сессию и отменяет scope.
  */
 class MouseManagerService : AccessibilityService() {
 
@@ -58,6 +62,15 @@ class MouseManagerService : AccessibilityService() {
     private val engine = RemapEngine()
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Единственный путь изменения `armed` (D-031): синхронно переводит движок и
+     * зеркало [ServiceState] в согласованное состояние. Собственного движка не
+     * хранит и берёт опубликованный экземпляр через [EngineHolder].
+     */
+    private val bridge = ServiceBridge(
+        logError = { Log.e(TAG, "service bridge failed", it) },
+    )
 
     private var configJob: Job? = null
 
@@ -93,37 +106,44 @@ class MouseManagerService : AccessibilityService() {
             engine = engine,
             dispatcher = dispatcher,
             record = { entry -> app.diagnosticsLog.record(entry) },
+            disarm = { bridge.setArmed(false) },
             logError = { Log.e(TAG, "key event handling failed", it) },
         )
     }
 
     /**
-     * Отложенный fail-safe disarm для `generation == 0` (D-030). Перед выключением
-     * повторно читает актуальный generation: устаревший callback не должен выключать
-     * новый runtime.
+     * Отложенный fail-safe disarm для `generation == 0` (D-030). Callback помнит
+     * токен сессии, в которой был запланирован: устаревший callback прошлой сессии
+     * не должен выключать перехват новой (D-031 п. 31.11).
      */
+    private var disarmSession = 0L
+
     private val disarmIfEmpty = Runnable {
-        if (engine.config.generation == 0L) engine.setArmed(false)
+        if (DisarmGuard.shouldDisarm(disarmSession, configSession, engine.config.generation)) {
+            bridge.setArmed(false)
+        }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
 
         // D-006: каждое подключение начинается с выключенного перехвата.
-        engine.setArmed(false)
+        // Движок публикуется до disarm, чтобы мост выключил именно этот экземпляр
+        // и синхронно обновил зеркало ServiceState (D-031).
+        EngineHolder.attach(engine)
+        bridge.setArmed(false)
         engine.resetState()
         // Новая сессия не наследует config/foreground предыдущей (D-030).
         engine.config = RuntimeConfig.EMPTY
         engine.foregroundPackage = null
         observedGeneration = null
-        EngineHolder.attach(engine)
 
         val appliedFlags = applyKeyFilterFlag()
         val filterApplied =
             (appliedFlags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS) != 0
         if (!filterApplied) {
             // Без фильтра перехват невозможен: движок остаётся выключенным (D-018).
-            engine.setArmed(false)
+            bridge.setArmed(false)
             Log.w(TAG, "key filter was not applied; remapping stays disarmed")
         }
 
@@ -158,7 +178,7 @@ class MouseManagerService : AccessibilityService() {
         } catch (t: Throwable) {
             // Fail-safe D-018: неожиданная ошибка не должна блокировать клавишу.
             Log.e(TAG, "onKeyEvent failed; event passed through", t)
-            engine.setArmed(false)
+            bridge.setArmed(false)
             false
         }
     }
@@ -242,10 +262,11 @@ class MouseManagerService : AccessibilityService() {
      * `generation == 0` — fail-safe состояние (D-018, D-030):
      * - начальный EMPTY получает отсрочку 1000 мс;
      * - переход `> 0 → 0` выключает перехват немедленно;
-     * - в обоих случаях callback повторно проверяет generation.
+     * - в обоих случаях callback захватывает токен текущей сессии и перед disarm
+     *   проверяет и его, и generation ([DisarmGuard], D-031 п. 31.11).
      *
      * Вызывается только из [applyConfigNow] на главном потоке, поэтому запись
-     * `observedGeneration` и `armed` не конкурирует со сменой сессии.
+     * `disarmSession`, `observedGeneration` и `armed` не конкурирует со сменой сессии.
      */
     private fun syncDisarm(generation: Long) {
         val previous = observedGeneration
@@ -254,8 +275,14 @@ class MouseManagerService : AccessibilityService() {
         mainHandler.removeCallbacks(disarmIfEmpty)
         when {
             generation > 0L -> Unit
-            previous != null && previous > 0L -> mainHandler.post(disarmIfEmpty)
-            else -> mainHandler.postDelayed(disarmIfEmpty, EMPTY_CONFIG_DISARM_DELAY_MS)
+            previous != null && previous > 0L -> {
+                disarmSession = configSession
+                mainHandler.post(disarmIfEmpty)
+            }
+            else -> {
+                disarmSession = configSession
+                mainHandler.postDelayed(disarmIfEmpty, EMPTY_CONFIG_DISARM_DELAY_MS)
+            }
         }
     }
 
@@ -274,7 +301,7 @@ class MouseManagerService : AccessibilityService() {
 
         mainHandler.removeCallbacks(disarmIfEmpty)
 
-        engine.setArmed(false)
+        bridge.setArmed(false)
         engine.resetState()
         engine.config = RuntimeConfig.EMPTY
         engine.foregroundPackage = null

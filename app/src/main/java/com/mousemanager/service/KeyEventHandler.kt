@@ -30,6 +30,11 @@ import com.mousemanager.diagnostics.decisionFor
  * **Действие.** [ActionDispatcher.dispatch] вызывается только для
  * [Verdict.ConsumeAndDispatch] и только на главном потоке (§13); сам диспетчер
  * показывает сообщение об отказе, служба второго Toast не делает.
+ *
+ * **Fail-safe disarm.** При ошибке [decide] вызывается [disarm], а не
+ * `engine.setArmed(false)` напрямую: служба передаёт туда [ServiceBridge], чтобы
+ * зеркало [ServiceState] не рассинхронизировалось с движком (D-031 п. 31.8).
+ * Значение по умолчанию сохраняет прежнее поведение для JVM-тестов.
  */
 class KeyEventHandler(
     private val engine: RemapEngine,
@@ -37,6 +42,7 @@ class KeyEventHandler(
     private val record: (KeyRecord) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
     private val decide: (KeyInput) -> Verdict = engine::onKey,
+    private val disarm: () -> Unit = { engine.setArmed(false) },
     private val logError: (Throwable) -> Unit = {},
 ) {
 
@@ -134,7 +140,7 @@ class KeyEventHandler(
 
     private fun disarmSafely() {
         try {
-            engine.setArmed(false)
+            disarm()
         } catch (t: Throwable) {
             logSafely(t)
         }

@@ -26,6 +26,40 @@ class ServiceStateTest {
 
         assertFalse(status.connected)
         assertFalse(status.filterApplied)
+        assertFalse(status.armed)
+    }
+
+    @Test
+    fun `armed mirror starts disabled and can be updated`() {
+        assertFalse(ServiceState.status.value.armed)
+
+        ServiceState.onArmed(true)
+
+        assertTrue(ServiceState.status.value.armed)
+    }
+
+    @Test
+    fun `stopping the service resets the armed mirror`() {
+        ServiceState.onConnected(appliedFlags = FILTER_FLAG, now = 1L)
+        ServiceState.onArmed(true)
+
+        ServiceState.onStopped()
+
+        assertFalse(ServiceState.status.value.connected)
+        assertFalse(ServiceState.status.value.armed)
+    }
+
+    @Test
+    fun `reconnecting never restores armed`() {
+        ServiceState.onConnected(appliedFlags = FILTER_FLAG, now = 1L)
+        ServiceState.onArmed(true)
+
+        ServiceState.onConnected(appliedFlags = FILTER_FLAG, now = 2L)
+
+        val status = ServiceState.status.value
+        assertTrue(status.connected)
+        assertFalse(status.armed)
+        assertEquals(2L, status.connectedAt)
     }
 
     @Test

@@ -26,13 +26,23 @@
     <string name="home_service_filter_missing">Не применён</string>
     <string name="home_service_note_disconnected">Без службы перехват невозможен. Включите её в системных настройках доступности.</string>
     <string name="home_service_note_filter_missing">Служба подключена, но система не приняла фильтр клавиш. Перехват невозможен: попробуйте выключить и снова включить службу в настройках доступности.</string>
-    <string name="home_service_note_ready">Служба подключена и фильтр клавиш применён. В этой версии кнопки всё равно не переназначаются.</string>
+    <string name="home_service_note_ready">Служба подключена и фильтр клавиш применён. Перехват можно включить ниже.</string>
     <string name="home_open_accessibility_settings">Открыть настройки доступности</string>
 
-    <!-- Home: мастер-переключатель (S7.2, D-006). -->
+    <!-- Home: мастер-переключатель (M2.4, D-006, D-031). -->
     <string name="home_master_title">Перехват кнопок</string>
-    <string name="home_master_note">Будет доступно в M2</string>
-    <string name="home_master_description">Пока перехват всегда выключен: боковые кнопки мыши работают как обычные Ctrl+C и Ctrl+V.</string>
+    <string name="home_master_description">Перехват разрешает приложению забирать боковые кнопки мыши. Пока действия не настроены, кнопки работают как Ctrl+C и Ctrl+V. Выключение действует сразу, включение требует подтверждения.</string>
+    <string name="home_master_state_on">Включён</string>
+    <string name="home_master_state_off">Выключен</string>
+    <string name="home_master_reason_disconnected">Служба доступности не подключена. Включите её в системных настройках.</string>
+    <string name="home_master_reason_filter_missing">Система не приняла фильтр клавиш. Переподключите службу в настройках доступности.</string>
+    <string name="home_master_reason_config_error">Настройки недоступны. Перезапустите приложение.</string>
+    <string name="home_master_reason_config_loading">Настройки загружаются…</string>
+    <string name="home_master_reason_engine_unavailable">Служба ещё не готова к перехвату. Попробуйте позже.</string>
+    <string name="home_master_confirm_title">Включить перехват?</string>
+    <string name="home_master_confirm_text">Приложение сможет забирать боковые кнопки мыши вместо Ctrl+C и Ctrl+V. Сейчас действия не настроены, поэтому кнопки продолжат работать как обычно. Перехват выключится при отключении службы или перезапуске приложения.</string>
+    <string name="home_master_confirm_confirm">Включить</string>
+    <string name="home_master_confirm_cancel">Отмена</string>
 
     <!-- Home: конфигурация (S7.2, D-018). -->
     <string name="home_config_title">Настройки</string>

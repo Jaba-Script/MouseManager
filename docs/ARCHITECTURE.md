@@ -112,7 +112,9 @@ com.mousemanager
 │   ├── KeyEventMapper.kt           KeyEvent → KeyInput
 │   ├── GlobalActionDispatcher.kt   ActionCode → performGlobalAction, rate limit (D-028)
 │   ├── CaptureController.kt        «нажмите кнопку» для добавления маппинга (M2)
-│   └── ServiceState.kt             статус службы (connected, flags) для UI
+│   ├── ServiceBridge.kt            единственный путь изменения armed (M2.4, D-031)
+│   ├── DisarmGuard.kt              токен сессии для отложенного disarm (M2.4)
+│   └── ServiceState.kt             статус службы для UI и зеркало armed (M2.4)
 │
 ├── data/
 │   ├── SettingsRepository.kt       единственная точка записи
@@ -135,7 +137,8 @@ com.mousemanager
 └── ui/
     ├── App.kt                      Screen, каркас, навигация, передача зависимостей
     ├── screens/
-    │   ├── HomeScreen.kt           статус службы, неактивный мастер-переключатель
+    │   ├── HomeScreen.kt           статус службы и мастер-переключатель (M2.4)
+    │   ├── HomeMasterState.kt      чистое состояние мастер-переключателя (M2.4)
     │   ├── HomeState.kt            чистое состояние карточки «Настройки»
     │   ├── DevicesScreen.kt        список устройств и выбор целей
     │   ├── DevicesState.kt         чистая сборка строк устройств
@@ -688,24 +691,32 @@ class MouseManagerService : AccessibilityService() {
     private var observedGeneration: Long? = null  // для немедленного disarm
 
     private val dispatcher by lazy { GlobalActionDispatcher(/* performGlobalAction, Toast, Log.e */) }
-    private val eventHandler by lazy { KeyEventHandler(engine, dispatcher, /* журнал */) }
+    private val bridge = ServiceBridge(logError = { Log.e(TAG, "service bridge failed", it) })
+    private val eventHandler by lazy {
+        KeyEventHandler(engine, dispatcher, /* журнал */, disarm = { bridge.setArmed(false) })
+    }
+
+    private var disarmSession = 0L              // токен сессии, захваченный при планировании
 
     private val disarmIfEmpty = Runnable {
-        if (engine.config.generation == 0L) engine.setArmed(false)  // повторная проверка
+        if (DisarmGuard.shouldDisarm(disarmSession, configSession, engine.config.generation)) {
+            bridge.setArmed(false)
+        }
     }
 
     override fun onServiceConnected() {
-        engine.setArmed(false)                 // D-006: каждое подключение — disarmed
+        // Публикуем движок до disarm: мост выключает именно этот экземпляр.
+        EngineHolder.attach(engine)
+        bridge.setArmed(false)                 // D-006: каждое подключение — disarmed
         engine.resetState()                    // pending прошлой сессии забыт
         engine.config = RuntimeConfig.EMPTY    // новая сессия не наследует старый снимок
         engine.foregroundPackage = null
         observedGeneration = null
-        EngineHolder.attach(engine)            // holder публикует тот же экземпляр
 
         val appliedFlags = applyKeyFilterFlag()
         val filterApplied =
             (appliedFlags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS) != 0
-        if (!filterApplied) engine.setArmed(false)  // D-018
+        if (!filterApplied) bridge.setArmed(false)  // D-018
 
         ServiceState.onConnected(appliedFlags) // только после attach и проверки фильтра
         observeConfig()
@@ -759,7 +770,7 @@ class MouseManagerService : AccessibilityService() {
         configJob = null
         configSession++                        // старый коллектор теряет право на запись
         mainHandler.removeCallbacks(disarmIfEmpty)
-        engine.setArmed(false)
+        bridge.setArmed(false)
         engine.resetState()
         engine.config = RuntimeConfig.EMPTY
         engine.foregroundPackage = null
@@ -773,9 +784,9 @@ class MouseManagerService : AccessibilityService() {
 **Конфигурация.** `engine.config` — единственный снимок для горячего пути; служба
 своего `config` не хранит. `generation == 0` — fail-safe: начальный `EMPTY`
 планирует disarm через 1000 мс, переход `> 0 → 0` выключает перехват немедленно.
-В обоих случаях callback на main `Handler` повторно проверяет актуальный
-generation, поэтому устаревший callback не выключает новый runtime. Изменение
-конфига никогда не включает `armed` (D-030).
+В обоих случаях callback на main `Handler` проверяет токен сессии и актуальный
+generation через `DisarmGuard`, поэтому устаревший callback не выключает новый
+runtime. Изменение конфига никогда не включает `armed` (D-030).
 
 **Сессия наблюдения.** `configSession` увеличивается при запуске и завершении
 сессии. Коллектор `ConfigStore.runtime` может пережить `configJob.cancel()`, поэтому
@@ -794,6 +805,7 @@ data class ServiceStatus(
     val appliedFlags: Int,
     val filterApplied: Boolean,   // appliedFlags and FLAG_REQUEST_FILTER_KEY_EVENTS != 0
     val connectedAt: Long,
+    val armed: Boolean,           // зеркало engine.armed для UI (D-031)
 )
 ```
 
@@ -818,19 +830,57 @@ object EngineHolder {
   идемпотентен.
 - `EngineHolder.engine` можно читать из любого потока; сам `RemapEngine` и
   `ChordTracker` потокобезопасными не становятся (§13).
-- С M2.3.4 holder подключён: `attach` в `onServiceConnected` после disarm/reset,
-  `detach` в идемпотентном `stopSession()` (`onUnbind` и `onDestroy`).
+- С M2.3.4 holder подключён: `attach` в `onServiceConnected` до disarm (мост выключает
+  именно опубликованный экземпляр), `detach` в идемпотентном `stopSession()`
+  (`onUnbind` и `onDestroy`).
+
+`ServiceBridge` (M2.4, D-031) — единственный публичный путь изменения `armed`:
+
+```kotlin
+class ServiceBridge(
+    engineProvider: () -> RemapEngine?,      // по умолчанию EngineHolder.engine
+    statusProvider: () -> ServiceStatus,     // по умолчанию ServiceState.status.value
+    armedMirror: (Boolean) -> Unit,          // по умолчанию ServiceState::onArmed
+    logError: (Throwable) -> Unit,           // по умолчанию пусто; служба передаёт Log.e
+) {
+    fun canArm(): Boolean                    // гейт для доступности тумблера
+    fun setArmed(armed: Boolean): Boolean    // фактическое armed после вызова
+}
+```
+
+- Мост не создаёт и не хранит `RemapEngine`: читает `EngineHolder.engine`, статус —
+  из `ServiceState.status`, зеркало пишет через `ServiceState.onArmed`.
+- Гейт включения: подключённая служба, `filterApplied == true`,
+  `engine.config.generation > 0`, доступный движок. `canArm()` проверяет его для UI,
+  `setArmed(true)` — повторно в момент вызова.
+- Выключение разрешено всегда и немедленно; если движок недоступен, обновляется
+  только зеркало. Включение при недоступном движке или исключении даёт `armed=false`;
+  причина передаётся в `logError`, наружу исключение не выходит (D-018).
+- `setArmed` возвращает фактическое состояние (`true` только если перехват включён),
+  а не признак успеха операции. Движок и зеркало меняются в одном вызове на главном
+  потоке (`@MainThread`); собственной синхронизации у моста нет.
+- Служба использует тот же мост для всех disarm: подключение, неприменённый фильтр,
+  ошибка `onKeyEvent`, `stopSession`, `disarmIfEmpty`. `KeyEventHandler` получает
+  callback `disarm = { bridge.setArmed(false) }`, поэтому аварийное выключение не
+  рассинхронизирует зеркало. Значение по умолчанию (`engine.setArmed(false)`)
+  сохраняет поведение JVM-тестов.
+
+`DisarmGuard` (M2.4, D-031 п. 31.11) — чистая проверка отложенного disarm:
+`shouldDisarm(scheduledSession, currentSession, generation)` возвращает `true` только
+при совпадении токена сессии и `generation == 0`. `disarmIfEmpty` захватывает токен
+при планировании; `stopSession()` увеличивает `configSession` до записей и снимает
+callback. Устаревший callback не выключает перехват новой сессии.
 
 `MouseManagerApp` остаётся точкой сборки данных (`SettingsRepository`, `ConfigStore`,
 `DeviceCatalog`, `DiagnosticsLog`) и инициализирует репозиторий один раз на процесс;
-служба его не создаёт. Владелец движка — служба. `setArmed(false)` вызывается в
-`onServiceConnected` и в `stopSession()`.
+служба его не создаёт. Владелец движка — служба. Все disarm, включая
+`onServiceConnected` и `stopSession()`, проходят через `ServiceBridge`.
 
-**Требование к M2.4.** UI и `ServiceBridge` не вправе разрешать включение `armed`
-только по `EngineHolder.engine != null`: holder публикует движок до проверки фильтра
-и не отражает остановку процесса/службы. Разрешать мастер-переключатель можно лишь
-при активном состоянии службы **и** `ServiceState.status.filterApplied == true`;
-при любом сомнении — `armed = false`. До M2.4 `armed` всегда `false`.
+**Гейт включения (M2.4).** UI и `ServiceBridge` не разрешают включение только по
+`EngineHolder.engine != null`: holder публикует движок до проверки фильтра и не
+отражает остановку процесса/службы. Включение разрешено лишь при активном состоянии
+службы, `ServiceState.status.filterApplied == true`, опубликованном конфиге
+(`generation > 0`) и доступном движке; при любом сомнении — `armed = false`.
 
 **Идемпотентность.** `onServiceConnected` может вызываться повторно (переподключение).
 Подписка каждый раз перезапускается с новым `configSession`, поэтому активным
@@ -870,28 +920,46 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 
 | Экран | Источники данных | Содержимое |
 |---|---|---|
-| **Home** | `ServiceState.status`, `ConfigStore.runtime`/`error` | Статус службы (подключена/нет) и реально применённый фильтр клавиш, кнопка перехода в системные настройки доступности, неактивный мастер-переключатель, сводка: число выбранных устройств и имя активного профиля |
+| **Home** | `ServiceState.status`, `ConfigStore.runtime`/`error`, `ServiceBridge` | Статус службы (подключена/нет) и реально применённый фильтр клавиш, кнопка перехода в системные настройки доступности, мастер-переключатель с подтверждением включения и причиной недоступности, сводка: число выбранных устройств и имя активного профиля |
 | **Devices** | `DeviceCatalog.devices`, `ConfigStore.runtime.targets`, `SettingsRepository.setTargets` | Список подключённых мышей и тачпадов (имя, `vendor:product`, сокращённый `descriptor`), сохранённые, но отключённые цели, чекбокс цели; дубликаты `descriptor` склеены в одну строку |
 | **Diagnostics** | `DiagnosticsLog.records`/`clear()` | Журнал `KeyRecord` (новые сверху): время, `Decision`, устройство, клавиша и `scanCode`, DOWN/UP, `metaState`, `isTarget`, `armed`; пустое состояние и очистка |
 | **About** | `BuildConfig.VERSION_NAME` | Назначение приложения, версия, ограничения текущей версии (D-009, D-012, D-014, D-017, D-021) |
 
-Чистые функции состояния (`homeConfigState`, `deviceRows`, `formatRecordTime`,
-`formatMetaState`, `decisionLabelRes`) вынесены из composable и покрыты JVM-тестами.
-Все пользовательские строки — в `strings.xml` (D-019). Общая карточка раздела —
-`ui/components/SectionCard.kt`.
+Чистые функции состояния (`homeConfigState`, `homeMasterState`, `deviceRows`,
+`formatRecordTime`, `formatMetaState`, `decisionLabelRes`) вынесены из composable и
+покрыты JVM-тестами. Все пользовательские строки — в `strings.xml` (D-019). Общая
+карточка раздела — `ui/components/SectionCard.kt`.
 
 ### 12.1 Мастер-переключатель
 
-В M1 `RemapEngine` — заглушка, `armed` не существует (D-006), поэтому переключатель
-всегда выключен и неактивен (`checked = false`, `enabled = false`,
-`onCheckedChange = null`), рядом — «Будет доступно в M2». Нажатие ничего не меняет и
-настройки не пишет.
+Реализовано в M2.4 (D-031). `HomeScreen` читает `ServiceState.status` и
+`ConfigStore.runtime`/`error`, а `armed` меняет только через `ServiceBridge`.
 
-В M2 (план): переключатель недоступен, если служба не подключена или
-`filterApplied=false`; при включении — диалог подтверждения, при выключении —
-мгновенно; рядом — статус службы, флага и выбранной цели. Наличие
-`EngineHolder.engine != null` само по себе не разрешает включение: holder не
-отражает ни применение фильтра, ни остановку службы (D-030 п. 30.12).
+Чистая `homeMasterState(status, runtime, error, canArm)` возвращает
+`HomeMasterState`:
+
+- `checked = status.armed`;
+- `enabled = reason == null`;
+- `reason` — первая причина по порядку: служба не подключена, фильтр не применён,
+  ошибка конфигурации, конфигурация загружается (`generation == 0`), мост/движок не
+  готов (`canArm == false`);
+- `requiresConfirmation = enabled && !checked`.
+
+Поведение UI:
+
+- включение — только после `AlertDialog` с подтверждением; подтверждение не
+  сохраняется и на следующую сессию не переносится;
+- выключение — сразу, без диалога; при включённом перехвате переключатель остаётся
+  доступным, даже если гейт успел закрыться (`enabled || checked`);
+- при недоступности рядом показывается причина из `strings.xml`; включить при
+  закрытом гейте нельзя;
+- наличие `EngineHolder.engine != null` само по себе включение не разрешает: гейт
+  проверяется в `ServiceBridge.canArm()`/`setArmed()` и включает `filterApplied`,
+  `generation > 0` и доступность движка (D-030 п. 30.12, D-031).
+
+Известное замечание (P2): если гейт закрывается между открытием диалога и
+подтверждением, `setArmed(true)` возвращает `false` без отдельного сообщения —
+переключатель остаётся выключенным, причина обновляется по `ServiceState`.
 
 ### 12.2 Режим захвата аккорда (M2)
 
@@ -975,9 +1043,12 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 
 ### 16.1 JVM unit-тесты (основное покрытие)
 
-`RemapEngine`, `ChordTracker`, `GlobalActionDispatcher`, `EngineHolder` и
-`KeyEventHandler` не зависят от Android-рантайма (у диспетчера Android-обвязка
-внедряется лямбдами), поэтому тестируются обычным JUnit:
+`RemapEngine`, `ChordTracker`, `GlobalActionDispatcher`, `EngineHolder`,
+`KeyEventHandler`, `ServiceBridge`, `DisarmGuard` и `HomeMasterState` не зависят от
+Android-рантайма (Android-обвязка и провайдеры внедряются лямбдами), поэтому
+тестируются обычным JUnit. `ServiceState` использует только константу флага Android,
+доступную в unit-тестах. Всего в M2.4 — **214 тестов в 19 suites**, 0 failures /
+0 errors / 0 skipped:
 
 | Тест | Ожидание |
 |---|---|
@@ -1014,7 +1085,7 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 | `KeyEventHandler`: порядок записей | `CONSUMED` до dispatch; при отказе — вторая запись `ACTION_FAILED` |
 | `KeyEventHandler`: ошибка записи | не меняет результат и не мешает dispatch |
 | `KeyEventHandler`: исключение dispatch | `ACTION_FAILED`, событие остаётся consumed |
-| `KeyEventHandler`: исключение engine | `setArmed(false)`, `PASSED_ERROR`, `false` |
+| `KeyEventHandler`: исключение engine | disarm-callback (в службе — `ServiceBridge.setArmed(false)`), `PASSED_ERROR`, `false` |
 | `KeyEventHandler`: `armedAtDecision` | читается до решения, даже если решение выключает `armed` |
 | `KeyEventHandler`: поля `ACTION_FAILED` | совпадают с `CONSUMED`; отличается только `decision` |
 | `KeyEventHandler`: `isTarget` | `true` только для выбранного target при `generation > 0` |
@@ -1029,6 +1100,13 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 | нет привязки | активный профиль |
 | нет активного | default |
 | нет маппинга | `Pass(NO_MAPPING)` |
+| `ServiceBridge`: гейт | нет службы / фильтра / `generation > 0` / движка → `canArm=false`, включение отклонено |
+| `ServiceBridge`: включение | при выполненном гейте движок и зеркало получают `true` в одном вызове |
+| `ServiceBridge`: выключение | разрешено всегда; при недоступном движке обновляется только зеркало |
+| `ServiceBridge`: ошибки | исключения провайдеров, зеркала и логгера не выходят наружу, итог — `armed=false` |
+| `ServiceState`: зеркало `armed` | `false` по умолчанию, `onStopped()` сбрасывает, переподключение не восстанавливает |
+| `DisarmGuard` | disarm только при совпадении токена сессии и `generation == 0` |
+| `HomeMasterState` | `checked`/`enabled`/`reason`/`requiresConfirmation` по состояниям службы, фильтра, конфига и `canArm` |
 
 Плюс тесты `ConfigCodec`: round-trip, неизвестное действие, битый JSON, миграция версий.
 
@@ -1064,6 +1142,9 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 18. Смена профиля/выключение перехвата во время удержания: нет залипания, нет второго
     действия.
 19. `LOCK_SCREEN` и `SCREENSHOT` на HyperOS: результат зафиксирован, без обещаний.
+
+Пункт 14 — единственная незакрытая часть M2.4: JVM-тесты не покрывают lifecycle
+службы и живой фильтр; проверка выполняется только по отдельному разрешению.
 
 **Чек-лист «голого Ctrl» (к пункту 15).**
 

@@ -1443,8 +1443,9 @@ dispatch. Если запись `CONSUMED` не удалась, событие �
 - `strings.xml` — строка `action_failed_toast`.
 - `ARCHITECTURE.md` §4, §6, §7, §11, §16.1 обновлены.
 - JVM-проверка пройдена 2026-11-17: **180 тестов в 16 suites**, 0 failures /
-  0 errors / 0 skipped; `KeyEventHandlerTest` — 15/15. Коммит — по отдельному
-  разрешению.
+  0 errors / 0 skipped; `KeyEventHandlerTest` — 15/15.
+- Коммит `f7eaaa2` «feat: add key event handler and service integration» —
+  опубликован на `origin/main`; M2.3.4 завершён.
 - Поведение продукта не меняется: `armed=false`, поэтому `Consume` и
   `ConsumeAndDispatch` в v1 недостижимы, все события проходят.
 
@@ -1456,3 +1457,180 @@ dispatch. Если запись `CONSUMED` не удалась, событие �
 повторяет поля `CONSUMED`; `isTarget` истинно только для выбранного target при
 `generation > 0`. Все перечисленные проверки пройдены в прогоне 180/16
 (`KeyEventHandlerTest` — 15/15).
+
+---
+
+## D-031 — M2.4: мастер-переключатель, наблюдаемое `armed` и `ServiceBridge`
+
+**Статус:** Accepted (подтверждено пользователем 2026-11-17, M2.4) и **реализовано**
+2026-11-17 в двух кодовых блоках M2.4; JVM-тесты — **214 в 19 suites**, 0 failures /
+0 errors / 0 skipped. Коммит и проверка на устройстве не выполнялись.
+
+**Контекст.** `armed` — `@Volatile`-поле `RemapEngine` с публичным `setArmed(Boolean)`.
+Compose не может наблюдать обычное поле, а UI не должен писать в движок напрямую: при
+переподключении службы или fail-safe disarm в горячем пути переключатель иначе
+показывал бы «включено», когда перехват уже выключен. D-006 требует, чтобы `armed` не
+сохранялся и всегда был `false` при старте процесса и каждом `onServiceConnected`;
+D-030 п. 30.12 запрещает разрешать включение только по `EngineHolder.engine != null`.
+Нужен один наблюдаемый источник истины для UI и один публичный путь изменения.
+
+**Решение.**
+
+31.1. Источник наблюдаемого состояния `armed` — `ServiceState`, без `StateFlow` в
+`RemapEngine`. Движок остаётся Android-free и без coroutines: на горячем пути
+по-прежнему читается `@Volatile engine.armed`, менять поле иначе не требуется.
+
+31.2. `ServiceStatus` получает зеркальное поле `armed: Boolean = false`. Значение
+меняется в том же вызове, что и реальный `engine.setArmed(...)`, на главном потоке;
+если движок недоступен, зеркало сбрасывается в `false` без вызова движка (31.5).
+`ServiceState.onStopped()` сбрасывает `armed=false`; `onConnected()` сам `armed` не
+выставляет — подключение никогда не включает перехват (D-006).
+
+31.3. Единственный публичный для UI путь изменения `armed` — `ServiceBridge`.
+Экран не вызывает `RemapEngine.setArmed`, не пишет `ServiceState` и не создаёт
+собственных экземпляров движка.
+
+31.4. `ServiceBridge` повторно проверяет условия включения при каждом запросе:
+служба подключена; `ServiceState.status.filterApplied == true`; конфиг опубликован
+(`generation > 0`); движок доступен (`EngineHolder.engine != null`). Проверка
+выполняется в момент включения, а не только в UI: состояние могло измениться между
+отрисовкой и нажатием.
+
+31.5. Выключение разрешено всегда и выполняется немедленно, даже если гейт не
+выполнен или движок недоступен. В последнем случае обновляется только зеркало:
+безопасное состояние — `false` (D-018).
+
+31.6. Включение выполняется только после явного подтверждения пользователя в UI
+(диалог). `ServiceBridge` диалог не показывает и не решает за UI: он принимает уже
+подтверждённый запрос. Подтверждение не хранится и на следующую сессию не переносится.
+
+31.7. `armed` не сохраняется в DataStore. Он сбрасывается при каждом
+`onServiceConnected` и при старте процесса; включение действует только в текущей
+сессии и только для текущего экземпляра службы (D-006).
+
+31.8. `KeyEventHandler` получает callback fail-safe disarm вместо прямого
+`engine.setArmed(false)`. Служба передаёт лямбду, которая выключает движок **и**
+обновляет зеркало `ServiceState`. Значение по умолчанию сохраняет прежнее поведение
+для JVM-тестов; порядок `CONSUMED → dispatch → ACTION_FAILED` и решение по событию
+не меняются (D-027).
+
+31.9. Любая ошибка при включении (исключение, недоступный движок, изменившееся
+состояние службы, сбой записи зеркала) приводит к `armed=false`. Наружу исключение не
+выходит; причина пишется в лог (D-018).
+
+31.10. `ServiceBridge` — отдельный файл `service/ServiceBridge.kt` и единственный
+посредник между UI и движком для управления `armed`. Другие точки записи `armed`
+отсутствуют: служба только выключает перехват через тот же путь.
+
+31.11. `disarmIfEmpty` усиливается защитой от устаревшего callback. `Runnable`
+захватывает токен сессии при планировании и при срабатывании проверяет и его, и
+`engine.config.generation == 0`; несовпадение токена — callback ничего не делает.
+`stopSession()` увеличивает токен и снимает callback, а планирование возможно только
+из текущей сессии. Поэтому callback прошлой сессии не может выключить перехват новой.
+
+31.12. Потоки. Все записи `armed` и зеркала выполняются на главном потоке: UI-клик,
+`onServiceConnected`, `stopSession`, срабатывание `disarmIfEmpty`. `ServiceBridge`
+потокобезопасным не становится — как и `ChordTracker`, он предназначен для main.
+Чтение из Compose идёт через `StateFlow` `ServiceState`; `engine.armed` остаётся
+`@Volatile` для горячего пути.
+
+31.13. Fail-safe. Нет движка, нет службы, нет фильтра, конфиг не опубликован, любое
+сомнение — `armed=false`, тумблер неактивен с честной причиной. Включение никогда не
+происходит «по умолчанию» и не восстанавливается после переподключения.
+
+**Реализация (2026-11-17).**
+
+- `service/ServiceBridge.kt` — `canArm()` и `setArmed(armed): Boolean`. Зависимости
+  (`engineProvider`, `statusProvider`, `armedMirror`, `logError`) внедряются; по
+  умолчанию мост читает `EngineHolder.engine` и `ServiceState.status.value`, а зеркало
+  пишет через `ServiceState.onArmed`. `setArmed` возвращает фактическое состояние
+  `armed`: выключение всегда даёт `false`, включение — `true` только при выполненном
+  гейте. Ошибки включения логируются и приводят к `disarm()`; исключения наружу не
+  выходят. Класс помечен `@MainThread` и не хранит собственный движок.
+- `service/DisarmGuard.kt` — чистая `shouldDisarm(scheduledSession, currentSession,
+  generation)`: `true` только при совпадении токена и `generation == 0`.
+- `ServiceState`: `ServiceStatus.armed` (по умолчанию `false`), `internal onArmed`,
+  сброс в `onStopped`; `onConnected` создаёт новый статус с `armed=false`.
+- `MouseManagerService`: поле `bridge` с `Log.e` в `logError`; в `onServiceConnected`
+  сначала `EngineHolder.attach(engine)`, затем `bridge.setArmed(false)`, `resetState`,
+  `config = EMPTY`, `foregroundPackage = null`. Все disarm (подключение, отсутствие
+  фильтра, ошибка `onKeyEvent`, `stopSession`, `disarmIfEmpty`) идут через мост;
+  `stopSession` увеличивает `configSession` до записей и снимает callback.
+  `disarmIfEmpty` захватывает `disarmSession` при планировании и вызывает
+  `DisarmGuard.shouldDisarm`.
+- `KeyEventHandler`: параметр `disarm: () -> Unit` (по умолчанию
+  `engine.setArmed(false)`); служба передаёт `{ bridge.setArmed(false) }`. Порядок
+  `CONSUMED → dispatch → ACTION_FAILED` не менялся.
+- `ui/screens/HomeMasterState.kt` — чистая `homeMasterState(status, runtime, error,
+  canArm)`: причины `SERVICE_DISCONNECTED`, `FILTER_MISSING`, `CONFIG_ERROR`,
+  `CONFIG_LOADING`, `ENGINE_UNAVAILABLE`; `checked = status.armed`,
+  `enabled = reason == null`, `requiresConfirmation = enabled && !checked`.
+- `ui/screens/HomeScreen.kt` — переключатель читает `ServiceState`, включает только
+  после `AlertDialog`; выключение вызывает `bridge.setArmed(false)` сразу. При
+  включённом перехвате переключатель остаётся доступным для выключения; рядом —
+  причина недоступности. Новые строки — в `strings.xml`, `home_master_note`
+  («Будет доступно в M2») удалена.
+
+**Обоснование.**
+
+- Зеркало в `ServiceState` даёт Compose наблюдаемое состояние без coroutines в `core`
+  и без изменения горячего пути.
+- Один публичный путь (`ServiceBridge`) исключает рассинхронизацию: любое включение и
+  выключение проходит через одну проверку и одну запись.
+- Проверка гейта в момент действия, а не только при отрисовке, закрывает окно между
+  показом тумблера и нажатием.
+- Callback в `KeyEventHandler` сохраняет зеркало правдивым после аварийного disarm —
+  иначе UI показывал бы включённый перехват после ошибки движка.
+- Токен сессии в `disarmIfEmpty` закрывает P3 из аудита M2.3.4: пока `armed=false`,
+  ошибка была безвредна, но с рабочим тумблером устаревший callback мог бы выключить
+  только что включённый перехват.
+
+**Совместимость.**
+
+- D-006: `armed` не хранится, `false` при старте и подключении, включение — только
+  действием пользователя, выключение мгновенное.
+- D-018: ошибки не блокируют ввод; при любом сбое — `armed=false` и pass.
+- D-019: все новые строки — в `strings.xml`.
+- D-020: новых зависимостей нет; `StateFlow` уже используется, `core` не меняется.
+- D-027/D-030: решение по событию, порядок записей и `armedAtDecision` не меняются.
+- D-029: `EngineHolder` не меняется; мост только читает `engine`.
+- Manifest, Gradle, зависимости и `spikes/**` не затрагиваются.
+
+**Следствия.**
+
+- Созданы: `service/ServiceBridge.kt`, `service/DisarmGuard.kt`,
+  `ui/screens/HomeMasterState.kt`; тесты `ServiceBridgeTest` (14),
+  `DisarmGuardTest` (5), `HomeMasterStateTest` (10).
+- Изменены: `service/ServiceState.kt` (+3 теста), `service/MouseManagerService.kt`,
+  `service/KeyEventHandler.kt` (+2 теста), `ui/screens/HomeScreen.kt`,
+  `strings.xml`.
+- `ARCHITECTURE.md` §11, §12.1, §16.1–§16.2 обновлены по факту кода.
+- Проверка на устройстве (п. 14 чек-листа §16.2) не выполнялась: отдельная задача,
+  требует отдельного разрешения.
+
+**Проверки (JVM, выполнены 2026-11-17).** `ServiceBridgeTest` (14): отказ гейта при
+неподключённой службе, отсутствии фильтра, `generation == 0` и недоступном движке;
+повторная проверка в момент включения; успешное включение; выключение разрешено
+всегда, в том числе без движка; зеркало и движок меняются вместе; идемпотентность;
+исключения провайдеров, зеркала и логгера не выходят наружу; ошибка включения
+логируется. `ServiceStateTest` (6): `armed=false` по умолчанию, обновление зеркала,
+сброс в `onStopped()`, отсутствие восстановления после переподключения.
+`DisarmGuardTest` (5): устаревшая сессия не выключает новую, опубликованный конфиг
+блокирует disarm, начальный токен `0` — валидная сессия. `KeyEventHandlerTest` (17):
+ошибка движка вызывает callback, сбой callback изолирован. `HomeMasterStateTest` (10):
+доступность и причина по состояниям службы, фильтра и конфигурации; необходимость
+подтверждения; сохранение `checked` при закрытом гейте. Итог:
+**214 тестов в 19 suites, 0 failures / 0 errors / 0 skipped**.
+
+**Известные замечания (не блокируют M2.4).**
+
+- P2: если гейт закрывается между открытием диалога и подтверждением, включение
+  отклоняется без отдельного сообщения — переключатель остаётся выключенным, причина
+  обновляется по `ServiceState`.
+- P3: lifecycle-интеграция службы (`onServiceConnected`, `stopSession`, реальное
+  планирование `disarmIfEmpty`) не покрыта JVM-тестами. Чистая логика токена покрыта
+  `DisarmGuardTest`; полная проверка — п. 14 чек-листа §16.2.
+- P3: `stopSession` выключает перехват через мост к текущему `EngineHolder.engine`;
+  identity-проверка защищает только `ServiceState.onStopped`. При штатном порядке
+  Android (`onDestroy` старой службы до `onServiceConnected` новой) это безопасно;
+  ownership-проверка disarm остаётся потенциальным улучшением.

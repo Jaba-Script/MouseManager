@@ -210,6 +210,42 @@ class KeyEventHandlerTest {
     }
 
     @Test
+    fun `engine exception invokes the injected disarm callback`() {
+        val engine = armedEngine()
+        var disarmCalls = 0
+        val handler = handlerFor(
+            engine = engine,
+            decide = { throw IllegalStateException("engine failed") },
+            disarm = { disarmCalls++ },
+        )
+
+        val result = handler.handle(keyInput(ACTION_DOWN), DEVICE_NAME)
+
+        assertFalse(result)
+        assertEquals(1, disarmCalls)
+        // Callback заменяет прямой setArmed: сам обработчик движок не выключает.
+        assertTrue(engine.armed)
+    }
+
+    @Test
+    fun `disarm callback failure is contained`() {
+        val engine = armedEngine()
+        val handler = handlerFor(
+            engine = engine,
+            decide = { throw IllegalStateException("engine failed") },
+            disarm = { throw IllegalStateException("bridge failed") },
+            logError = { logged += it },
+        )
+
+        val result = handler.handle(keyInput(ACTION_DOWN), DEVICE_NAME)
+
+        assertFalse(result)
+        assertEquals(listOf(Decision.PASSED_ERROR), decisions())
+        // Первый лог — сбой callback, второй — исходная ошибка движка.
+        assertEquals(2, logged.size)
+    }
+
+    @Test
     fun `armed is captured before the decision`() {
         val engine = armedEngine()
         val handler = handlerFor(
@@ -264,6 +300,7 @@ class KeyEventHandlerTest {
         dispatcher: ActionDispatcher = FakeDispatcher(),
         record: (KeyRecord) -> Unit = { recorded += it },
         decide: (KeyInput) -> Verdict = engine::onKey,
+        disarm: () -> Unit = { engine.setArmed(false) },
         logError: (Throwable) -> Unit = { logged += it },
     ): KeyEventHandler = KeyEventHandler(
         engine = engine,
@@ -271,6 +308,7 @@ class KeyEventHandlerTest {
         record = record,
         now = { RECORD_TIME },
         decide = decide,
+        disarm = disarm,
         logError = logError,
     )
 
