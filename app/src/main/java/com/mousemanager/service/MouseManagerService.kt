@@ -3,16 +3,17 @@ package com.mousemanager.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
+import android.widget.Toast
 import com.mousemanager.BuildConfig
 import com.mousemanager.MouseManagerApp
-import com.mousemanager.core.KeyInput
-import com.mousemanager.core.PassReason
+import com.mousemanager.R
 import com.mousemanager.core.RemapEngine
 import com.mousemanager.core.RuntimeConfig
-import com.mousemanager.core.Verdict
 import com.mousemanager.diagnostics.Decision
 import com.mousemanager.diagnostics.KeyRecord
 import kotlinx.coroutines.CoroutineScope
@@ -24,40 +25,109 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /**
- * Служба доступности M1 (§11): только диагностика.
+ * Служба доступности M2.3.4 (§11): перехват клавиш, решение [RemapEngine],
+ * диагностика и выполнение действия.
  *
- * Она запрашивает [AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS], чтобы
- * получать `onKeyEvent`, и **никогда** не возвращает `true`: ничего не поглощается и не
- * переназначается. Решение всегда принимает [RemapEngine], который в M1 возвращает
- * `Pass(DISARMED)`.
+ * Служба остаётся тонкой: разбор `KeyEvent` и lifecycle — здесь, обработка одного
+ * события — в [KeyEventHandler]. Сам движок ничего не знает про Android.
  *
- * Конфигурация приходит асинхронно из [com.mousemanager.data.ConfigStore]. Начальный
- * [RuntimeConfig.EMPTY] (generation = 0) — это ещё не пользовательский конфиг, поэтому
- * до первой успешной публикации `isTarget` всегда `false`.
+ * **`armed` всегда `false`.** Мастер-переключатель появится в M2.4 (D-006), поэтому
+ * до него служба не поглощает клавиши и не выполняет действия: поведение продукта
+ * совпадает с M1. Интеграция проверяется JVM-тестами `KeyEventHandler`.
  *
- * `armed` в M1 — константа `false` (D-006): мастер-переключателя ещё нет.
+ * **Конфигурация.** Единственный источник — [RemapEngine.config]. Начальный
+ * [RuntimeConfig.EMPTY] (`generation == 0`) — ещё не конфиг пользователя, поэтому при
+ * нём планируется fail-safe disarm (D-030).
+ *
+ * **Сессия.** Конфиг применяется только текущей сессией наблюдения: `configSession`
+ * увеличивается при старте и завершении сессии, а все записи `engine.config` и
+ * планирование disarm выполняются на главном потоке с проверкой токена. Поэтому
+ * отменённый, но ещё не завершившийся сборщик не может записать устаревший снимок
+ * или выключить перехват после `onUnbind`/`onDestroy`.
+ *
+ * **Жизненный цикл.** `onServiceConnected` всегда начинает с `armed = false`,
+ * сбрасывает трекер, `config = EMPTY` и `foregroundPackage = null`, затем публикует
+ * движок через [EngineHolder]. `onUnbind` снимает сессию (включая сброс config и
+ * foreground), но не отменяет общий scope; `onDestroy` снимает сессию и отменяет scope.
  */
 class MouseManagerService : AccessibilityService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** Заглушка M1: всегда `Pass(DISARMED)`; состояние не нужно. */
+    /** Владелец движка — служба; [EngineHolder] хранит только ссылку (D-029). */
     private val engine = RemapEngine()
 
-    @Volatile
-    private var config: RuntimeConfig = RuntimeConfig.EMPTY
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var configJob: Job? = null
+
+    /**
+     * Токен текущей сессии наблюдения за конфигом. Меняется только на главном потоке.
+     * Коллектор применяет снимок, лишь пока его токен совпадает с этим значением.
+     */
+    private var configSession = 0L
+
+    /** Последняя generation, увиденная коллектором: нужна для немедленного disarm. */
+    @Volatile
+    private var observedGeneration: Long? = null
 
     private val app: MouseManagerApp
         get() = application as MouseManagerApp
 
+    /**
+     * Диспетчер создаётся лениво: `performGlobalAction` доступен только после
+     * подключения службы. Единственный Toast об отказе показывает он (D-028).
+     */
+    private val dispatcher by lazy {
+        GlobalActionDispatcher(
+            perform = { globalAction -> performGlobalAction(globalAction) },
+            notifyFailure = {
+                Toast.makeText(this, R.string.action_failed_toast, Toast.LENGTH_SHORT).show()
+            },
+            logFailure = { Log.e(TAG, "global action failed", it) },
+        )
+    }
+
+    private val eventHandler by lazy {
+        KeyEventHandler(
+            engine = engine,
+            dispatcher = dispatcher,
+            record = { entry -> app.diagnosticsLog.record(entry) },
+            logError = { Log.e(TAG, "key event handling failed", it) },
+        )
+    }
+
+    /**
+     * Отложенный fail-safe disarm для `generation == 0` (D-030). Перед выключением
+     * повторно читает актуальный generation: устаревший callback не должен выключать
+     * новый runtime.
+     */
+    private val disarmIfEmpty = Runnable {
+        if (engine.config.generation == 0L) engine.setArmed(false)
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
 
-        // D-006: каждое подключение начинается с выключенного перехвата. В M1
-        // переключать нечего — RemapEngine не имеет armed.
+        // D-006: каждое подключение начинается с выключенного перехвата.
+        engine.setArmed(false)
+        engine.resetState()
+        // Новая сессия не наследует config/foreground предыдущей (D-030).
+        engine.config = RuntimeConfig.EMPTY
+        engine.foregroundPackage = null
+        observedGeneration = null
+        EngineHolder.attach(engine)
+
         val appliedFlags = applyKeyFilterFlag()
+        val filterApplied =
+            (appliedFlags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS) != 0
+        if (!filterApplied) {
+            // Без фильтра перехват невозможен: движок остаётся выключенным (D-018).
+            engine.setArmed(false)
+            Log.w(TAG, "key filter was not applied; remapping stays disarmed")
+        }
+
+        // Публикуем подключение только после attach и проверки фильтра.
         ServiceState.onConnected(appliedFlags)
         observeConfig()
 
@@ -71,36 +141,49 @@ class MouseManagerService : AccessibilityService() {
     }
 
     /**
-     * M1: журналируем событие и **всегда** возвращаем `false`. Даже если в будущем
-     * вердикт станет `Consume`, служба этой вехи не имеет права поглощать ввод.
+     * M2.3.4: результат определяет [KeyEventHandler]. `KeyEvent` без descriptor
+     * безопасно проходит, ошибка разбора не блокирует ввод (D-018).
      */
-    override fun onKeyEvent(event: KeyEvent): Boolean = try {
-        val input = KeyEventMapper.toKeyInput(event)
-        val verdict = engine.onKey(input)
-        record(event, input, verdict)
-        false
-    } catch (t: Throwable) {
-        // Fail-safe D-018: ошибка разбора/движка не должна блокировать клавишу.
-        Log.e(TAG, "onKeyEvent failed; event passed through", t)
-        false
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        val input = try {
+            KeyEventMapper.toKeyInput(event)
+        } catch (t: Throwable) {
+            Log.e(TAG, "key event mapping failed; event passed through", t)
+            recordMappingFailure(event)
+            return false
+        }
+
+        return try {
+            eventHandler.handle(input, event.device?.name ?: UNKNOWN_DEVICE)
+        } catch (t: Throwable) {
+            // Fail-safe D-018: неожиданная ошибка не должна блокировать клавишу.
+            Log.e(TAG, "onKeyEvent failed; event passed through", t)
+            engine.setArmed(false)
+            false
+        }
     }
 
-    /** Foreground-пакет понадобится для профилей приложений в M2; в M1 не нужен. */
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    /**
+     * Foreground-пакет нужен для привязок профилей (§8). `null`/пустой пакет не
+     * затирает последнее известное значение.
+     */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+
+        val packageName = event.packageName?.toString()?.takeIf { it.isNotBlank() } ?: return
+        engine.foregroundPackage = packageName
+    }
 
     override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: Intent?): Boolean {
-        configJob?.cancel()
-        configJob = null
-        ServiceState.onStopped()
+        stopSession()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        configJob?.cancel()
+        stopSession()
         scope.cancel()
-        ServiceState.onStopped()
         super.onDestroy()
     }
 
@@ -113,63 +196,129 @@ class MouseManagerService : AccessibilityService() {
     }
 
     /**
-     * Подписка идемпотентна: повторный `onServiceConnected` не создаёт второй сборщик.
+     * Перезапускает подписку с новым токеном сессии: повторный `onServiceConnected`
+     * не оставляет второй активный сборщик, а старый теряет право на запись.
      * `ConfigStore.runtime` — горячий `StateFlow`, поэтому подписка сразу отдаёт текущий
      * снимок, включая начальный `RuntimeConfig.EMPTY`.
      */
     private fun observeConfig() {
-        if (configJob?.isActive == true) return
+        configJob?.cancel()
+        val session = ++configSession
         configJob = scope.launch {
             app.configStore.runtime.collect { runtime ->
-                config = runtime
-                if (BuildConfig.DEBUG && runtime.generation > 0) {
-                    Log.d(
-                        TAG,
-                        "config generation=${runtime.generation} targets=${runtime.targets.size}",
-                    )
-                }
+                applyConfig(session, runtime)
             }
         }
     }
 
-    private fun record(event: KeyEvent, input: KeyInput, verdict: Verdict) {
-        val runtime = config
-        // generation == 0 — начальный EMPTY или ошибка загрузки, а не конфиг
-        // пользователя. Такие события не считаем «целевыми».
-        val configLoaded = runtime.generation > 0
-        val descriptor = input.deviceDescriptor
+    /**
+     * Запись `engine.config` и планирование disarm сериализованы на главном потоке:
+     * `onServiceConnected`/`stopSession` тоже выполняются там, поэтому проверка токена
+     * и изменение состояния атомарны относительно смены сессии.
+     */
+    private fun applyConfig(session: Long, runtime: RuntimeConfig) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applyConfigNow(session, runtime)
+        } else {
+            mainHandler.post { applyConfigNow(session, runtime) }
+        }
+    }
 
-        app.diagnosticsLog.record(
-            KeyRecord(
-                timestamp = System.currentTimeMillis(),
-                deviceId = input.deviceId,
-                deviceName = event.device?.name ?: UNKNOWN_DEVICE,
-                descriptor = descriptor,
-                keyCode = input.keyCode,
-                scanCode = input.scanCode,
-                metaState = input.metaState,
-                repeatCount = input.repeatCount,
-                action = input.action,
-                decision = decisionFor(verdict),
-                isTarget = configLoaded && descriptor != null && descriptor in runtime.targets,
-                armed = false,
-            ),
-        )
+    /** Применяет снимок, только если сессия всё ещё текущая. */
+    private fun applyConfigNow(session: Long, runtime: RuntimeConfig) {
+        if (session != configSession) return
+
+        engine.config = runtime
+        syncDisarm(runtime.generation)
+        if (BuildConfig.DEBUG && runtime.generation > 0) {
+            Log.d(
+                TAG,
+                "config generation=${runtime.generation} targets=${runtime.targets.size}",
+            )
+        }
     }
 
     /**
-     * В M1 движок возвращает только `Pass(DISARMED)`. Остальные ветки нужны, чтобы
-     * журнал не потерял событие, если заглушку случайно заменят раньше M2.
+     * `generation == 0` — fail-safe состояние (D-018, D-030):
+     * - начальный EMPTY получает отсрочку 1000 мс;
+     * - переход `> 0 → 0` выключает перехват немедленно;
+     * - в обоих случаях callback повторно проверяет generation.
+     *
+     * Вызывается только из [applyConfigNow] на главном потоке, поэтому запись
+     * `observedGeneration` и `armed` не конкурирует со сменой сессии.
      */
-    private fun decisionFor(verdict: Verdict): Decision = when (verdict) {
-        Verdict.Pass(PassReason.DISARMED) -> Decision.PASSED_DISARMED
-        is Verdict.Pass -> Decision.PASSED_ERROR
-        Verdict.Consume -> Decision.CONSUMED
-        is Verdict.ConsumeAndDispatch -> Decision.CONSUMED
+    private fun syncDisarm(generation: Long) {
+        val previous = observedGeneration
+        observedGeneration = generation
+
+        mainHandler.removeCallbacks(disarmIfEmpty)
+        when {
+            generation > 0L -> Unit
+            previous != null && previous > 0L -> mainHandler.post(disarmIfEmpty)
+            else -> mainHandler.postDelayed(disarmIfEmpty, EMPTY_CONFIG_DISARM_DELAY_MS)
+        }
+    }
+
+    /**
+     * Идемпотентное завершение сессии. `onUnbind` и `onDestroy` могут вызвать его
+     * оба: повторная отмена job, снятие callback и `detach` безопасны.
+     *
+     * Токен увеличивается **до** любых записей: коллектор прошлой сессии, который
+     * пережил `cancel()`, уже не пройдёт проверку в [applyConfigNow] и не изменит ни
+     * `config`, ни запланированный disarm.
+     */
+    private fun stopSession() {
+        configJob?.cancel()
+        configJob = null
+        configSession++
+
+        mainHandler.removeCallbacks(disarmIfEmpty)
+
+        engine.setArmed(false)
+        engine.resetState()
+        engine.config = RuntimeConfig.EMPTY
+        engine.foregroundPackage = null
+
+        // Старый экземпляр не должен помечать «остановленной» новую службу.
+        if (EngineHolder.engine === engine) ServiceState.onStopped()
+        EngineHolder.detach(engine)
+
+        observedGeneration = null
+    }
+
+    /**
+     * D-027: исключение в `onKeyEvent` фиксируется как `PASSED_ERROR`, насколько это
+     * возможно без разобранного [com.mousemanager.core.KeyInput]. Сбой журнала не
+     * выходит наружу.
+     */
+    private fun recordMappingFailure(event: KeyEvent) {
+        try {
+            app.diagnosticsLog.record(
+                KeyRecord(
+                    timestamp = System.currentTimeMillis(),
+                    deviceId = event.deviceId,
+                    deviceName = event.device?.name ?: UNKNOWN_DEVICE,
+                    descriptor = event.device?.descriptor,
+                    keyCode = event.keyCode,
+                    scanCode = event.scanCode,
+                    metaState = event.metaState,
+                    repeatCount = event.repeatCount,
+                    action = event.action,
+                    decision = Decision.PASSED_ERROR,
+                    isTarget = false,
+                    armed = engine.armed,
+                ),
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "failed to record key mapping error", t)
+        }
     }
 
     private companion object {
         const val TAG = "MouseManager"
         const val UNKNOWN_DEVICE = "unknown"
+
+        /** Отсрочка fail-safe disarm для начального `RuntimeConfig.EMPTY` (D-030). */
+        const val EMPTY_CONFIG_DISARM_DELAY_MS = 1_000L
     }
 }

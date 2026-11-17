@@ -7,12 +7,12 @@
 
 | Параметр | Значение |
 |---|---|
-| Фаза | **M1 принята** 2026-11-13; **M2.3.2 завершён и опубликован** 2026-11-16 (`3c8b40f`); **M2.3.3 реализован и проверен** 2026-11-16 (165 тестов); M2 выполняется, следующий — M2.3.4 |
-| Следующий шаг | **M2.3.4 — интеграция `EngineHolder` в `MouseManagerService`**; этапы M2.1–M2.8 — в `ROADMAP.md`; старт — по отдельному подтверждению |
-| HEAD | `3c8b40f` «feat: add global action dispatcher» (вершина `main`, опубликована); M2.3.3 не закоммичен; P3 — `a9a096b` |
+| Фаза | **M1 принята** 2026-11-13; **M2.3.3 опубликован** 2026-11-16 (`898d124`, 165 тестов); **M2.3.4 реализован** 2026-11-16 и **прошёл JVM-проверку** 2026-11-17 (180 тестов в 16 suites, 0 падений); следующий — M2.4 |
+| Следующий шаг | **M2.4 — мастер-переключатель и Home**; этапы M2.1–M2.8 — в `ROADMAP.md`; старт — по отдельному подтверждению |
+| HEAD | `898d124` «feat: add process-wide engine holder» (вершина `main`, опубликована); M2.3.4 не закоммичен; P3 — `a9a096b` |
 | M0 | Завершён 2026-11-11 (этапы 1–7), итоги — D-023 |
 | M1 | **Принята на устройстве 2026-11-13** (S8): 13 PASS, 1 SKIP (физическая клавиатура); S1–S8 завершены (D-024, D-025) |
-| Сборка / тесты | `:app:testDebugUnitTest` — **165 тестов в 15 suites**, 0 failures / 0 errors / 0 skipped (прогон M2.3.3, 2026-11-16); `:app:assembleDebug` проходил в S7, с тех пор не запускался |
+| Сборка / тесты | `:app:testDebugUnitTest` — **180 тестов в 16 suites**, 0 failures / 0 errors / 0 skipped (прогон M2.3.4, 2026-11-17; `KeyEventHandlerTest` — 15/15). `:app:assembleDebug` проходил в S7, с тех пор не запускался |
 | UI | 4 экрана S7: Home, Devices, Diagnostics, About; навигация без `navigation-compose` (§12) |
 | Мастер-переключатель | В UI неактивен и выключен до M2.4; `armed` не хранится и всегда `false` при старте процесса и подключении службы (D-006) |
 | Профили | Именованные + ручное переключение в v1; per-app — M3 (D-011); UI — M2 |
@@ -103,7 +103,7 @@ Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assemble
 | Все 12 `Decision` в UI не наблюдались | в M1 виден `PASSED_DISARMED`; остальные подписи покрыты JVM-тестом |
 | Побочный эффект «голого» Ctrl | живой тест в M2.6 — после первого рабочего маппинга (в M2.4 маппингов ещё нет); D-005 не меняется без отдельного ADR |
 | `performGlobalAction(LOCK_SCREEN/SCREENSHOT)` на HyperOS | живой тест в M2.8; до проверки поддержку не обещать (D-010) |
-| Диспетчер не подключён к службе | M2.3.4: до этого поведение M1 (`onKeyEvent == false`, `armed=false`) |
+| Диспетчер подключён, но `armed=false` | M2.3.4: `KeyEventHandler` и `GlobalActionDispatcher` готовы; до M2.4 перехват выключен, поведение M1 (`onKeyEvent == false`) |
 | Поведение при выключенном экране | живой тест |
 | Две одинаковые мыши → один `descriptor` | ограничение; предупреждение в UI |
 | DataStore повреждён/медленный | fail-safe (D-018), unit-тесты кодека |
@@ -115,7 +115,7 @@ Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assemble
 
 ## 6. Открытые вопросы
 
-1. **M2** — выполняется: **M2.3.1 завершён** 2026-11-16 (D-027, `DecisionMapper`, 12 `Decision`; коммит `7c27b80`), **M2.3.2 завершён и опубликован** 2026-11-16 (`ActionDispatcher`, `GlobalActionDispatcher`, D-028; 154 теста, коммит `3c8b40f`), **M2.3.3 реализован и проверен** 2026-11-16 (`EngineHolder`, D-029; 11 JVM-тестов, прогон — 165 в 15 suites; коммит — по отдельному разрешению); следующий — M2.3.4 (интеграция в службу). Этапы M2.1–M2.8 — `ROADMAP.md`, технические уточнения — `ARCHITECTURE.md` §6–§7, §11 и D-026–D-029.
+1. **M2** — выполняется: **M2.3.1 завершён** 2026-11-16 (D-027, `DecisionMapper`, 12 `Decision`; коммит `7c27b80`), **M2.3.2 завершён и опубликован** 2026-11-16 (`ActionDispatcher`, `GlobalActionDispatcher`, D-028; 154 теста, коммит `3c8b40f`), **M2.3.3 завершён и опубликован** 2026-11-16 (`EngineHolder`, D-029; 165 тестов, коммит `898d124`), **M2.3.4 реализован** 2026-11-16 (`KeyEventHandler`, интеграция службы, D-030; JVM-проверка пройдена 2026-11-17 — **180 тестов в 16 suites, 0 failures / 0 errors / 0 skipped**; коммит — по отдельному разрешению); следующий — M2.4 (мастер-переключатель). Этапы M2.1–M2.8 — `ROADMAP.md`, технические уточнения — `ARCHITECTURE.md` §6–§7, §11 и D-026–D-030.
 2. **Panic tile** — нужен ли Quick Settings tile для мгновенного отключения (M4)?
 3. **S1/S2 на планшете** — S2 выключена (D-025); оставить как архив или удалить после M1?
 4. **Диагностика в release** — нужен ли экспорт журнала в файл?
@@ -141,7 +141,9 @@ Set-Location "<путь-к-репозиторию>"; .\gradlew.bat :app:assemble
 | 2026-11-15 | **M2.2 завершён**: `core/RemapEngine.kt` (строгий порядок §6: pending UP/repeat до `armed`/`targets`, скользящее окно 1500 мс, repeat только при pending, `NONE` — обычный маппинг), `RuntimeConfig.resolve` (§8: привязка приложения → активный → default; внутри профиля descriptor → `ANY_DEVICE`); тесты `RemapEngineTest` (38) и `RuntimeConfigTest` (13); `:app:testDebugUnitTest` — **132 теста в 12 suites, 0 failures / 0 errors / 0 skipped**; служба не тронута, dispatch не добавлен |
 | 2026-11-16 | **M2.3.1 завершён**: `diagnostics/DecisionMapper.kt`, 4 новых `Decision` (`PASSED_NO_DESCRIPTOR`, `PASSED_NO_TARGETS`, `PASSED_KEY_UP`, `PASSED_REPEAT`), D-027; 138 тестов в 13 suites, 0 падений; коммит `7c27b80` «feat: map pass reasons to diagnostic decisions» — 8 файлов, +240/−12; опубликован на `origin/main` |
 | 2026-11-16 | **M2.3.2 завершён и опубликован**: `core/ActionDispatcher.kt`, `service/GlobalActionDispatcher.kt` (маппинг 8 `GLOBAL_ACTION_*`, `NONE`, rate limit 2000 мс), `GlobalActionDispatcherTest` (16 тестов), D-028; `:app:testDebugUnitTest` — **154 теста в 14 suites, 0 failures / 0 errors / 0 skipped**; коммит `3c8b40f` «feat: add global action dispatcher» — 6 файлов, +580/−28; опубликован на `origin/main` |
-| 2026-11-16 | **M2.3.3 реализован и проверен**: `service/EngineHolder.kt` (process-wide `AtomicReference`, last-attach-wins, identity-detach, без хранения состояния движка), `EngineHolderTest` (11 тестов), D-029; `:app:testDebugUnitTest` — **165 тестов в 15 suites, 0 failures / 0 errors / 0 skipped**; коммит — по отдельному разрешению |
-| — | Следующий шаг — M2.3.4 (интеграция `EngineHolder` в `MouseManagerService`); старт — по отдельному подтверждению |
+| 2026-11-16 | **M2.3.3 завершён и опубликован**: `service/EngineHolder.kt` (process-wide `AtomicReference`, last-attach-wins, identity-detach, без хранения состояния движка), `EngineHolderTest` (11 тестов), D-029; `:app:testDebugUnitTest` — **165 тестов в 15 suites, 0 failures / 0 errors / 0 skipped**; коммит `898d124` «feat: add process-wide engine holder» |
+| 2026-11-16 | **M2.3.4 реализован**: `service/KeyEventHandler.kt` (порядок `CONSUMED → dispatch → ACTION_FAILED`, изоляция диагностики, `armedAtDecision`), `KeyEventHandlerTest` (15 тестов), интеграция службы (`EngineHolder`, `GlobalActionDispatcher`, `DecisionMapper`, config generation, foreground package, `stopSession`), D-030 |
+| 2026-11-17 | **M2.3.4 прошёл JVM-проверку**: `:app:testDebugUnitTest` — **180 тестов в 16 suites, 0 failures / 0 errors / 0 skipped**; `KeyEventHandlerTest` — 15/15; коммит — по отдельному разрешению |
+| — | Следующий шаг — M2.4 (мастер-переключатель и Home); старт — по отдельному подтверждению |
 
 История M0 по этапам — D-023 и `docs/archive/M0-runbook.md` §3.

@@ -1308,3 +1308,151 @@ process-wide держатель, который не становится вто
 новый; повторный `detach` идемпотентен; чтение без экземпляра безопасно; `attach` и
 `detach` не меняют `armed`, `config`, `foregroundPackage` и pending движка;
 последовательный lifecycle `attach → detach → attach` предсказуем.
+
+---
+
+## D-030 — Интеграция M2.3.4: `KeyEventHandler`, lifecycle и диагностика отказа
+
+**Статус:** Accepted (подтверждено пользователем 2026-11-16, M2.3.4)
+
+**Контекст.** До M2.3.4 служба содержала заглушку M1: всегда возвращала `false`,
+хранила собственное `@Volatile config`, не обновляла `foregroundPackage`, не
+подключала `DecisionMapper`, `GlobalActionDispatcher` и `EngineHolder`. После
+интеграции горячий путь должен возвращать `true` для поглощённых событий, писать
+корректные `Decision` и не терять поглощение из-за диагностики. При этом `armed`
+остаётся `false` до M2.4, поэтому поведение продукта визуально не меняется.
+
+**Решение.**
+
+30.1. Обработка одного события вынесена в Android-free
+`service/KeyEventHandler.kt`. Зависимости — `RemapEngine`, `ActionDispatcher`,
+sink `(KeyRecord) -> Unit`, `now`, `decide: (KeyInput) -> Verdict` (по умолчанию
+`engine::onKey`) и `logError`. Это позволяет проверять горячий путь JUnit 4 без
+Robolectric и без новых зависимостей.
+
+30.2. Порядок в `handle(input, deviceName)`:
+1. прочитать `engine.armed` — `armedAtDecision` — и `engine.config` **до** решения;
+2. вызвать `decide`;
+3. `Pass` → `decisionFor(verdict)` из `DecisionMapper` → запись → `false`;
+4. `Consume` → запись `CONSUMED` → `true`;
+5. `ConsumeAndDispatch` → запись `CONSUMED` → `dispatcher.dispatch` → при `false`
+   или исключении вторая запись `ACTION_FAILED` (копия первой, меняется только
+   `decision`) → `true` в любом случае.
+
+30.3. Диагностика вторична: `record`, `now` и `logError` вызываются через
+безопасные обёртки. Исключение в них не меняет возвращаемое значение и не мешает
+dispatch. Если запись `CONSUMED` не удалась, событие всё равно остаётся
+поглощённым.
+
+30.4. Ошибка `decide` (`Throwable`): безопасный `engine.setArmed(false)`, запись
+`PASSED_ERROR` (если запись возможна), лог, `false`. Ошибка `dispatcher.dispatch`
+перехватывается и превращается в `ACTION_FAILED`; наружу не выходит.
+
+30.5. `MouseManagerService` больше не хранит собственный `config`: коллектор
+`ConfigStore.runtime` пишет в `engine.config`. `EngineHolder` используется по
+назначению: `attach` после disarm/reset при подключении, `detach` в
+идемпотентном `stopSession()`.
+
+30.5a. Применение конфига защищено токеном сессии `configSession`. Подписка
+перезапускается при каждом `onServiceConnected` (`cancel` + новый токен), а
+`stopSession()` увеличивает токен до любых записей. Коллектор, переживший
+`configJob.cancel()`, применяет снимок только в `applyConfigNow` на главном
+потоке и только при совпадении токена, поэтому не может ни записать устаревший
+`engine.config`, ни запланировать/выполнить delayed-disarm. Запись `config`,
+`observedGeneration` и планирование disarm сериализованы на main — там же, где
+выполняются `onServiceConnected` и `stopSession`.
+
+30.5b. Начало и завершение сессии сбрасывают `engine.config = RuntimeConfig.EMPTY`,
+`engine.foregroundPackage = null` и `observedGeneration = null`: новая сессия не
+наследует снимок и foreground прошлой, а завершённая не оставляет после себя
+включённый перехват или запланированный callback.
+
+30.6. `onServiceConnected`: disarm → `resetState()` → сброс `config = EMPTY`,
+`foregroundPackage = null`, `observedGeneration = null` → `attach` → применить
+`FLAG_REQUEST_FILTER_KEY_EVENTS` → проверить фактически применённые flags → если
+фильтр не применён, оставить `armed=false` → `ServiceState.onConnected` → подписка
+на конфиг. Публикация статуса происходит только после attach и проверки фильтра.
+
+30.7. `generation == 0` — fail-safe (D-018): начальный `EMPTY` планирует disarm
+через `1000 мс` на main `Handler`; переход `> 0 → 0` выключает перехват немедленно
+(через `post`, а не прямой записью из фонового потока). Callback перед disarm
+повторно проверяет `engine.config.generation == 0`, поэтому устаревший callback не
+выключает новый runtime. Callback снимается в `stopSession()`, а его планирование
+возможно только из текущей сессии (30.5a).
+
+30.8. `foregroundPackage` обновляется в `onAccessibilityEvent` только для
+`TYPE_WINDOW_STATE_CHANGED` и только для непустого package name. `null`/blank не
+затирают последнее известное значение.
+
+30.9. `onKeyEvent` — тонкий: `KeyEventMapper` → `KeyEventHandler` → вернуть его
+результат. Ошибка маппера логируется и по возможности пишется как `PASSED_ERROR`
+по полям `KeyEvent`; неожиданная ошибка обработчика → disarm и `false` (D-018).
+
+30.10. `onUnbind` вызывает `stopSession()`, но **не** отменяет общий
+`CoroutineScope`: повторный `onServiceConnected` на том же экземпляре должен снова
+подписаться. `onDestroy` вызывает `stopSession()` и затем `scope.cancel()`.
+`stopSession()` отменяет `configJob`, увеличивает `configSession`, снимает callback,
+выключает `armed`, сбрасывает трекер, возвращает `config = EMPTY` и
+`foregroundPackage = null`, обнуляет `observedGeneration`, вызывает
+`ServiceState.onStopped()` только если `EngineHolder.engine === engine`, и делает
+`detach`.
+
+30.11. Единственный Toast об отказе действия показывает
+`GlobalActionDispatcher`; служба второго уведомления не делает. Текст —
+`action_failed_toast` в `strings.xml`.
+
+30.12. Требование к M2.4: UI и `ServiceBridge` не разрешают включение `armed`
+только по `EngineHolder.engine != null`. Holder публикует движок до проверки
+фильтра и не отражает остановку службы, поэтому включение допустимо лишь при
+активном состоянии службы **и** `ServiceState.status.filterApplied == true`; при
+любом сомнении — `armed = false` (D-018).
+
+**Обоснование.**
+
+- `KeyEventHandler` отделяет Android-обвязку от логики и делает проверяемыми
+  порядок записей и гарантию consumed — то, что нельзя проверить через
+  `AccessibilityService` без Robolectric.
+- `CONSUMED` до dispatch и `ACTION_FAILED` второй записью сохраняют обе истины:
+  клавиша поглощена и действие не выполнено (D-027 п. 27.3).
+- `AtomicReference`/`EngineHolder` не управляет состоянием; служба остаётся
+  единственным владельцем `armed`, `config` и `foregroundPackage` (D-029).
+- Немедленный disarm при `> 0 → 0` закрывает окно, в котором ошибка конфига
+  оставила бы перехват включённым; отсрочка для начального `EMPTY` не даёт
+  выключить перехват раньше, чем `ConfigStore` опубликует реальный снимок.
+- Отказ от `scope.cancel()` в `onUnbind` сохраняет работоспособность повторного
+  подключения того же экземпляра службы.
+
+**Совместимость.**
+
+- D-006: `armed` не сохраняется и всегда `false` при старте и подключении;
+  мастер-переключатель — M2.4.
+- D-018: ошибки не блокируют ввод; при сбое — pass/disarm; порядок pending до
+  `armed` не меняется.
+- D-026: `RemapEngine` и `ChordTracker` не изменяются.
+- D-027: `DecisionMapper` — единственный маппинг; `armedAtDecision` читается до
+  `onKey`; `ACTION_FAILED` не заменяет `CONSUMED`.
+- D-028: диспетчер не меняется; служба только собирает его и передаёт событие.
+- D-029: holder не меняется; `attach`/`detach` вызываются службой.
+- Manifest, Gradle, зависимости и `spikes/**` не затрагиваются.
+
+**Следствия.**
+
+- `service/KeyEventHandler.kt` — новый файл.
+- `service/KeyEventHandlerTest.kt` — 15 JVM-тестов.
+- `MouseManagerService.kt` — lifecycle, конфиг, foreground, dispatcher, teardown.
+- `strings.xml` — строка `action_failed_toast`.
+- `ARCHITECTURE.md` §4, §6, §7, §11, §16.1 обновлены.
+- JVM-проверка пройдена 2026-11-17: **180 тестов в 16 suites**, 0 failures /
+  0 errors / 0 skipped; `KeyEventHandlerTest` — 15/15. Коммит — по отдельному
+  разрешению.
+- Поведение продукта не меняется: `armed=false`, поэтому `Consume` и
+  `ConsumeAndDispatch` в v1 недостижимы, все события проходят.
+
+**Проверки (JVM).** `Pass` → `false` и `Decision` из маппера; `Consume`
+→ `true` и `CONSUMED`; `ConsumeAndDispatch` пишет `CONSUMED` до dispatch; отказ и
+исключение dispatch добавляют `ACTION_FAILED` и не отменяют `true`; ошибки записи
+на любом шаге не меняют результат; ошибка движка выключает `armed` и пишет
+`PASSED_ERROR`; `armedAtDecision` фиксируется до решения; `ACTION_FAILED`
+повторяет поля `CONSUMED`; `isTarget` истинно только для выбранного target при
+`generation > 0`. Все перечисленные проверки пройдены в прогоне 180/16
+(`KeyEventHandlerTest` — 15/15).

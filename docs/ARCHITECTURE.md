@@ -108,6 +108,7 @@ com.mousemanager
 ├── service/                        Android-обвязка
 │   ├── MouseManagerService.kt      AccessibilityService, тонкий
 │   ├── EngineHolder.kt             процессная ссылка на RemapEngine (M2.3.3)
+│   ├── KeyEventHandler.kt          решение, журнал и dispatch одного события (M2.3.4)
 │   ├── KeyEventMapper.kt           KeyEvent → KeyInput
 │   ├── GlobalActionDispatcher.kt   ActionCode → performGlobalAction, rate limit (D-028)
 │   ├── CaptureController.kt        «нажмите кнопку» для добавления маппинга (M2)
@@ -256,31 +257,56 @@ enum class PassReason {
 
 ## 6. Горячий путь: алгоритм
 
-`MouseManagerService.onKeyEvent` — тонкий. Вся логика в `RemapEngine`.
+`MouseManagerService.onKeyEvent` — тонкий: разбор `KeyEvent` и защитная обвязка.
+Решение, журнал и dispatch одного события — в `KeyEventHandler` (M2.3.4), сама
+логика вердикта — в `RemapEngine`.
 
 ```kotlin
 override fun onKeyEvent(event: KeyEvent): Boolean {
-    val input = KeyEventMapper.toKeyInput(event)
-    val verdict = try {
-        engine.onKey(input)
+    val input = try {
+        KeyEventMapper.toKeyInput(event)
     } catch (t: Throwable) {
-        diagnostics.recordError(t)
-        engine.setArmed(false)
+        Log.e(TAG, "mapping failed", t)
+        recordMappingFailure(event)      // PASSED_ERROR, если возможно
         return false
     }
-    diagnostics.record(input, verdict, engine.snapshot())
-    if (verdict is Verdict.ConsumeAndDispatch) {
-        try {
-            dispatcher.dispatch(verdict.action)
-        } catch (t: Throwable) {
-            // Клавиша уже поглощена; не пробрасываем исключение в InputDispatcher.
-            diagnostics.recordError(t)   // ACTION_FAILED
-        }
-        return true
+    return try {
+        eventHandler.handle(input, event.device?.name ?: "unknown")
+    } catch (t: Throwable) {
+        engine.setArmed(false)           // fail-safe D-018
+        false
     }
-    return verdict is Verdict.Consume
+}
+
+// KeyEventHandler, Android-free
+fun handle(input: KeyInput, deviceName: String): Boolean {
+    val armedAtDecision = engine.armed          // до решения (D-027)
+    val runtime = engine.config                // единственный источник конфига
+    val base = recordFor(input, deviceName, runtime, armedAtDecision)
+
+    val verdict = try {
+        decide(input)
+    } catch (t: Throwable) {
+        engine.setArmed(false)
+        record(base.copy(decision = PASSED_ERROR))
+        return false
+    }
+
+    return when (verdict) {
+        is Pass -> { record(base.copy(decision = decisionFor(verdict))); false }
+        Consume -> { record(base.copy(decision = CONSUMED)); true }
+        is ConsumeAndDispatch -> {
+            record(base.copy(decision = CONSUMED))          // сначала CONSUMED
+            val ok = try { dispatcher.dispatch(verdict.action) } catch (t: Throwable) { false }
+            if (!ok) record(base.copy(decision = ACTION_FAILED))
+            true                                             // всегда consumed
+        }
+    }
 }
 ```
+
+`record` и `log` вызываются только через безопасные обёртки: их исключение не
+меняет возвращаемое значение и не мешает dispatch.
 
 `RemapEngine.onKey` — строгий порядок проверок (fail-safe, D-018):
 
@@ -518,8 +544,9 @@ internal fun globalActionFor(action: ActionCode): Int? = when (action) {
   потокобезопасен.
 - `NONE` → `globalActionFor == null` → `true`: системный API и Toast не вызываются.
 - `false` или исключение → `dispatch` возвращает `false`, без исключения наружу и без
-  повторной попытки. `logFailure` получает причину; запись `ACTION_FAILED` и Toast делает
-  служба в M2.3.4, сохраняя исходный `CONSUMED` (D-027 п. 27.3).
+  повторной попытки. `logFailure` получает причину. `KeyEventHandler` пишет `CONSUMED`
+  до dispatch и `ACTION_FAILED` второй записью, сохраняя поглощение; Toast показывает
+  только диспетчер (D-027 п. 27.3, D-030).
 - Rate limit: `lastFailureNotifiedAt: Long? = null` гарантирует первый Toast даже при
   `now() == 0`; дальше — не чаще одного раза в 2000 мс. Отметка ставится **до** вызова
   `notifyFailure`, поэтому исключение в Toast не приводит к повторному показу. Исключения
@@ -652,36 +679,112 @@ data class MouseDevice(
 class MouseManagerService : AccessibilityService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private lateinit var engine: RemapEngine
-    private lateinit var dispatcher: GlobalActionDispatcher
+    private val engine = RemapEngine()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var configJob: Job? = null
+    private var configSession = 0L              // токен сессии, меняется на main
+
+    @Volatile
+    private var observedGeneration: Long? = null  // для немедленного disarm
+
+    private val dispatcher by lazy { GlobalActionDispatcher(/* performGlobalAction, Toast, Log.e */) }
+    private val eventHandler by lazy { KeyEventHandler(engine, dispatcher, /* журнал */) }
+
+    private val disarmIfEmpty = Runnable {
+        if (engine.config.generation == 0L) engine.setArmed(false)  // повторная проверка
+    }
 
     override fun onServiceConnected() {
-        // 1. armed = false: каждое подключение начинает с выключенного перехвата (D-006)
-        // 2. Применить FLAG_REQUEST_FILTER_KEY_EVENTS и прочитать, что реально применилось
-        // 3. Если filterApplied == false -> armed = false + предупреждение в UI
-        // 4. Инициализировать репозиторий/снимок (идемпотентно)
-        // 5. Подписаться на RuntimeConfig
-        // 6. Опубликовать ServiceState (connected, appliedFlags)
-        // 7. chordTracker.resetAll()
+        engine.setArmed(false)                 // D-006: каждое подключение — disarmed
+        engine.resetState()                    // pending прошлой сессии забыт
+        engine.config = RuntimeConfig.EMPTY    // новая сессия не наследует старый снимок
+        engine.foregroundPackage = null
+        observedGeneration = null
+        EngineHolder.attach(engine)            // holder публикует тот же экземпляр
+
+        val appliedFlags = applyKeyFilterFlag()
+        val filterApplied =
+            (appliedFlags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS) != 0
+        if (!filterApplied) engine.setArmed(false)  // D-018
+
+        ServiceState.onConnected(appliedFlags) // только после attach и проверки фильтра
+        observeConfig()
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean { /* см. §6 */ }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType == TYPE_WINDOW_STATE_CHANGED) {
-            foregroundPackage = event.packageName?.toString()
-        }
+        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        val pkg = event.packageName?.toString()?.takeIf { it.isNotBlank() } ?: return
+        engine.foregroundPackage = pkg          // null/blank не затирают известное значение
     }
 
     override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: Intent?): Boolean {
-        scope.cancel()
-        ServiceState.onStopped()
+        stopSession()                          // scope не отменяем: возможен повторный connect
         return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        stopSession()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    /** Перезапуск подписки с новым токеном; активным остаётся один сборщик. */
+    private fun observeConfig() {
+        configJob?.cancel()
+        val session = ++configSession
+        configJob = scope.launch {
+            app.configStore.runtime.collect { applyConfig(session, it) }
+        }
+    }
+
+    /** Все записи состояния — на main; токен проверяется перед каждой записью. */
+    private fun applyConfig(session: Long, runtime: RuntimeConfig) {
+        if (Looper.myLooper() == Looper.getMainLooper()) applyConfigNow(session, runtime)
+        else mainHandler.post { applyConfigNow(session, runtime) }
+    }
+
+    private fun applyConfigNow(session: Long, runtime: RuntimeConfig) {
+        if (session != configSession) return   // коллектор прошлой сессии ничего не меняет
+        engine.config = runtime
+        syncDisarm(runtime.generation)
+    }
+
+    /** Идемпотентно: onUnbind и onDestroy могут вызвать оба. */
+    private fun stopSession() {
+        configJob?.cancel()
+        configJob = null
+        configSession++                        // старый коллектор теряет право на запись
+        mainHandler.removeCallbacks(disarmIfEmpty)
+        engine.setArmed(false)
+        engine.resetState()
+        engine.config = RuntimeConfig.EMPTY
+        engine.foregroundPackage = null
+        if (EngineHolder.engine === engine) ServiceState.onStopped()
+        EngineHolder.detach(engine)
+        observedGeneration = null
     }
 }
 ```
+
+**Конфигурация.** `engine.config` — единственный снимок для горячего пути; служба
+своего `config` не хранит. `generation == 0` — fail-safe: начальный `EMPTY`
+планирует disarm через 1000 мс, переход `> 0 → 0` выключает перехват немедленно.
+В обоих случаях callback на main `Handler` повторно проверяет актуальный
+generation, поэтому устаревший callback не выключает новый runtime. Изменение
+конфига никогда не включает `armed` (D-030).
+
+**Сессия наблюдения.** `configSession` увеличивается при запуске и завершении
+сессии. Коллектор `ConfigStore.runtime` может пережить `configJob.cancel()`, поэтому
+мало отменить job: снимок применяется только в `applyConfigNow`, на главном потоке и
+только при совпадении токена. `engine.config`, `observedGeneration` и планирование
+`disarmIfEmpty` меняются лишь там же, где вызываются `onServiceConnected` и
+`stopSession`; старый коллектор не может ни записать устаревший config, ни
+запланировать/выполнить delayed-disarm. Начало и конец сессии дополнительно
+сбрасывают `engine.config` в `RuntimeConfig.EMPTY` и `foregroundPackage` в `null`.
 
 `ServiceState` — синглтон в процессе приложения:
 
@@ -715,17 +818,23 @@ object EngineHolder {
   идемпотентен.
 - `EngineHolder.engine` можно читать из любого потока; сам `RemapEngine` и
   `ChordTracker` потокобезопасными не становятся (§13).
-- Подключение к службе — M2.3.4: `attach` в `onServiceConnected`, `detach` в
-  `onUnbind`/`onDestroy`. До этого holder существует, но служба его не использует.
+- С M2.3.4 holder подключён: `attach` в `onServiceConnected` после disarm/reset,
+  `detach` в идемпотентном `stopSession()` (`onUnbind` и `onDestroy`).
 
 `MouseManagerApp` остаётся точкой сборки данных (`SettingsRepository`, `ConfigStore`,
-`DeviceCatalog`, `DiagnosticsLog`), но движок не создаёт: владелец — служба.
-В M2.4 UI обратится к движку через `ServiceBridge`; в M2.3.4 `setArmed(false)` будет
-вызываться в `onServiceConnected` и `onUnbind`; при `engine == null` включить перехват
-из UI нельзя.
+`DeviceCatalog`, `DiagnosticsLog`) и инициализирует репозиторий один раз на процесс;
+служба его не создаёт. Владелец движка — служба. `setArmed(false)` вызывается в
+`onServiceConnected` и в `stopSession()`.
+
+**Требование к M2.4.** UI и `ServiceBridge` не вправе разрешать включение `armed`
+только по `EngineHolder.engine != null`: holder публикует движок до проверки фильтра
+и не отражает остановку процесса/службы. Разрешать мастер-переключатель можно лишь
+при активном состоянии службы **и** `ServiceState.status.filterApplied == true`;
+при любом сомнении — `armed = false`. До M2.4 `armed` всегда `false`.
 
 **Идемпотентность.** `onServiceConnected` может вызываться повторно (переподключение).
-Инициализация репозитория и подписка защищены флагом; трекер сбрасывается.
+Подписка каждый раз перезапускается с новым `configSession`, поэтому активным
+остаётся один сборщик; трекер, `config` и `foregroundPackage` сбрасываются.
 
 **Одна служба-фильтр.** В продуктовой конфигурации `FLAG_REQUEST_FILTER_KEY_EVENTS`
 запрашивает только `MouseManagerService`. Вторая Accessibility-служба с этим флагом
@@ -780,7 +889,9 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 
 В M2 (план): переключатель недоступен, если служба не подключена или
 `filterApplied=false`; при включении — диалог подтверждения, при выключении —
-мгновенно; рядом — статус службы, флага и выбранной цели.
+мгновенно; рядом — статус службы, флага и выбранной цели. Наличие
+`EngineHolder.engine != null` само по себе не разрешает включение: holder не
+отражает ни применение фильтра, ни остановку службы (D-030 п. 30.12).
 
 ### 12.2 Режим захвата аккорда (M2)
 
@@ -864,9 +975,9 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 
 ### 16.1 JVM unit-тесты (основное покрытие)
 
-`RemapEngine`, `ChordTracker`, `GlobalActionDispatcher` и `EngineHolder` не зависят от
-Android-рантайма (у диспетчера Android-обвязка внедряется лямбдами), поэтому
-тестируются обычным JUnit:
+`RemapEngine`, `ChordTracker`, `GlobalActionDispatcher`, `EngineHolder` и
+`KeyEventHandler` не зависят от Android-рантайма (у диспетчера Android-обвязка
+внедряется лямбдами), поэтому тестируются обычным JUnit:
 
 | Тест | Ожидание |
 |---|---|
@@ -899,6 +1010,14 @@ Android-рантайма (у диспетчера Android-обвязка вне�
 | `EngineHolder.attach` | публикует тот же экземпляр; новый заменяет старый; повтор идемпотентен |
 | `EngineHolder.detach` | снимает только текущий; чужой или старый экземпляр не трогает новый |
 | `EngineHolder` и состояние движка | `attach`/`detach` не меняют `armed`, `config`, `foregroundPackage` и pending |
+| `KeyEventHandler`: `Pass`/`Consume`/`ConsumeAndDispatch` | `false` / `true` / `true`; `Decision` берётся из `DecisionMapper` |
+| `KeyEventHandler`: порядок записей | `CONSUMED` до dispatch; при отказе — вторая запись `ACTION_FAILED` |
+| `KeyEventHandler`: ошибка записи | не меняет результат и не мешает dispatch |
+| `KeyEventHandler`: исключение dispatch | `ACTION_FAILED`, событие остаётся consumed |
+| `KeyEventHandler`: исключение engine | `setArmed(false)`, `PASSED_ERROR`, `false` |
+| `KeyEventHandler`: `armedAtDecision` | читается до решения, даже если решение выключает `armed` |
+| `KeyEventHandler`: поля `ACTION_FAILED` | совпадают с `CONSUMED`; отличается только `decision` |
+| `KeyEventHandler`: `isTarget` | `true` только для выбранного target при `generation > 0` |
 | между C DOWN и C UP пришёл Ctrl UP | pending сохраняется |
 | pending старше 1500 мс | сбрасывается |
 | смена конфига между DOWN и UP | UP всё равно `Consume` |

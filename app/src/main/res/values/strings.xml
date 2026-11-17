@@ -87,6 +87,7 @@
     <string name="decision_passed_non_hardware">Пропущено: не аппаратное событие</string>
     <string name="decision_passed_error">Пропущено: ошибка</string>
     <string name="decision_action_failed">Ошибка выполнения действия</string>
+    <string name="action_failed_toast">Не удалось выполнить действие</string>
 
     <!-- About (S7.6). -->
     <string name="about_description">Приложение для переназначения боковых кнопок физической мыши на системные действия без root-прав.</string>
