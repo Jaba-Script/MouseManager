@@ -1,10 +1,10 @@
 package com.mousemanager.ui.screens
 
-import com.mousemanager.core.RuntimeConfig
 import com.mousemanager.data.ConfigError
 import com.mousemanager.service.ServiceStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -37,8 +37,7 @@ class HomeMasterStateTest {
     @Test
     fun `config error is reported before loading`() {
         val state = state(
-            status = status(),
-            runtime = RuntimeConfig.EMPTY,
+            status = status(configGeneration = 0L),
             error = ConfigError.UNAVAILABLE,
             canArm = false,
         )
@@ -50,9 +49,7 @@ class HomeMasterStateTest {
     @Test
     fun `unpublished config is still loading`() {
         val state = state(
-            status = status(),
-            runtime = RuntimeConfig.EMPTY,
-            error = null,
+            status = status(configGeneration = 0L),
             canArm = false,
         )
 
@@ -66,6 +63,28 @@ class HomeMasterStateTest {
 
         assertFalse(state.enabled)
         assertEquals(HomeMasterReason.ENGINE_UNAVAILABLE, state.reason)
+    }
+
+    @Test
+    fun `published config generation clears the pending reason`() {
+        // Служба подключена и фильтр применён, но конфиг ещё не записан в движок.
+        val loading = state(status(configGeneration = 0L), canArm = false)
+        assertEquals(HomeMasterReason.CONFIG_LOADING, loading.reason)
+
+        // onConfigApplied(1): зеркало обновилось — Home перерисовывается сам.
+        val ready = state(status(configGeneration = 1L), canArm = true)
+
+        assertNull(ready.reason)
+        assertTrue(ready.enabled)
+        assertTrue(ready.requiresConfirmation)
+    }
+
+    @Test
+    fun `engine unavailable is not shown before the config is applied`() {
+        val state = state(status(configGeneration = 0L), canArm = false)
+
+        assertEquals(HomeMasterReason.CONFIG_LOADING, state.reason)
+        assertNotEquals(HomeMasterReason.ENGINE_UNAVAILABLE, state.reason)
     }
 
     @Test
@@ -122,35 +141,22 @@ class HomeMasterStateTest {
 
     private fun state(
         status: ServiceStatus = status(),
-        runtime: RuntimeConfig = runtimeConfig(),
         error: ConfigError? = null,
         canArm: Boolean = false,
-    ): HomeMasterState = homeMasterState(status, runtime, error, canArm)
+    ): HomeMasterState = homeMasterState(status, error, canArm)
 
     private fun status(
         connected: Boolean = true,
         filterApplied: Boolean = true,
         armed: Boolean = false,
+        configGeneration: Long = 1L,
     ): ServiceStatus = ServiceStatus(
         connected = connected,
         appliedFlags = if (filterApplied) FILTER_FLAG else 0,
         connectedAt = if (connected) 1L else 0L,
         armed = armed,
+        configGeneration = configGeneration,
     )
-
-    private fun runtimeConfig(generation: Long = 1L): RuntimeConfig =
-        if (generation == 0L) {
-            RuntimeConfig.EMPTY
-        } else {
-            RuntimeConfig(
-                generation = generation,
-                targets = emptySet(),
-                profiles = emptyMap(),
-                activeProfileId = "default",
-                defaultProfileId = "default",
-                appBindings = emptyMap(),
-            )
-        }
 
     private companion object {
         // AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS (S2: flags=0x20).

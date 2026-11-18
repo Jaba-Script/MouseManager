@@ -15,10 +15,13 @@ import com.mousemanager.core.RemapEngine
  * условиях (D-030 п. 30.12, D-031 п. 31.4):
  * - служба подключена;
  * - `filterApplied == true`;
- * - конфиг опубликован (`generation > 0`) — иначе fail-safe disarm выключит перехват;
+ * - конфиг применён текущей сессией — наблюдаемое зеркало `configGeneration > 0`;
  * - движок доступен.
  *
- * Условия проверяются заново в момент вызова, а не только при отрисовке тумблера.
+ * Наблюдаемая часть гейта ([canArm]) нужна только для доступности тумблера: она не
+ * читает движок, иначе UI не перерисовался бы после асинхронной записи конфига.
+ * Окончательное решение [setArmed] принимает по свежему состоянию и дополнительно
+ * проверяет `engine.config.generation` — источник истины, а не зеркало.
  * Выключение разрешено всегда и выполняется немедленно.
  *
  * **Ошибки.** Любой сбой при включении приводит к `armed=false`; исключение наружу
@@ -39,10 +42,18 @@ class ServiceBridge(
     /**
      * Можно ли включить перехват прямо сейчас. Используется UI для доступности
      * тумблера; решение всё равно принимает [setArmed] по свежему состоянию.
+     *
+     * Читает только наблюдаемые зеркала [ServiceStatus]: генерация конфига приходит
+     * через `StateFlow`, поэтому Compose перерисовывает тумблер сразу после того, как
+     * служба применила конфиг. Движок здесь не читается намеренно.
      */
     @MainThread
     fun canArm(): Boolean = try {
-        isArmable()
+        if (engineProvider() == null) {
+            false
+        } else {
+            isArmable(statusProvider())
+        }
     } catch (t: Throwable) {
         logSafely(t)
         false
@@ -61,19 +72,14 @@ class ServiceBridge(
         }
 
         return try {
-            if (!isArmable()) {
+            val engine = engineProvider()
+            if (engine == null || !isArmable(statusProvider()) || !hasPublishedConfig(engine)) {
                 disarm()
                 false
             } else {
-                val engine = engineProvider()
-                if (engine == null) {
-                    disarm()
-                    false
-                } else {
-                    engine.setArmed(true)
-                    armedMirror(true)
-                    true
-                }
+                engine.setArmed(true)
+                armedMirror(true)
+                true
             }
         } catch (t: Throwable) {
             // Любая ошибка включения — безопасное состояние (D-018, D-031 п. 31.9).
@@ -84,16 +90,22 @@ class ServiceBridge(
     }
 
     /**
-     * Свежая проверка гейта. `generation` читается из опубликованного движка: при
-     * `0` включение запрещено, иначе отложенный fail-safe disarm выключит перехват.
+     * Свежая проверка наблюдаемой части гейта. `configGeneration` — зеркало движка,
+     * обновляемое службой в одном вызове с записью `engine.config`; оно же служит
+     * сигналом перерисовки для UI.
      */
-    private fun isArmable(): Boolean {
-        val status = statusProvider()
-        val engine = engineProvider() ?: return false
-        return status.connected &&
+    private fun isArmable(status: ServiceStatus): Boolean =
+        status.connected &&
             status.filterApplied &&
-            engine.config.generation > 0L
-    }
+            status.configGeneration > 0L
+
+    /**
+     * Окончательная проверка по источнику истины (D-030 п. 30.12): включение разрешает
+     * только конфиг, реально записанный в движок. Зеркало могло обновиться раньше по
+     * времени, поэтому одного `configGeneration` недостаточно.
+     */
+    private fun hasPublishedConfig(engine: RemapEngine): Boolean =
+        engine.config.generation > 0L
 
     /**
      * Выключение разрешено всегда. Движок и зеркало переводятся в `false`; если один

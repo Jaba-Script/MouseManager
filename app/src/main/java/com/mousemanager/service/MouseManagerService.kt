@@ -39,7 +39,9 @@ import kotlinx.coroutines.launch
  *
  * **Конфигурация.** Единственный источник — [RemapEngine.config]. Начальный
  * [RuntimeConfig.EMPTY] (`generation == 0`) — ещё не конфиг пользователя, поэтому при
- * нём планируется fail-safe disarm (D-030).
+ * нём планируется fail-safe disarm (D-030). Применённая генерация публикуется в
+ * [ServiceState] наблюдаемым зеркалом: UI узнаёт о готовности через `StateFlow`, а не
+ * чтением движка при композиции.
  *
  * **Сессия.** Конфиг применяется только текущей сессией наблюдения: `configSession`
  * увеличивается при старте и завершении сессии, а все записи `engine.config` и
@@ -249,6 +251,9 @@ class MouseManagerService : AccessibilityService() {
         if (session != configSession) return
 
         engine.config = runtime
+        // Зеркало для UI: публикуем после записи, чтобы Home перерисовался по
+        // наблюдаемому состоянию, а не читал движок во время композиции.
+        ServiceState.onConfigApplied(runtime.generation)
         syncDisarm(runtime.generation)
         if (BuildConfig.DEBUG && runtime.generation > 0) {
             Log.d(

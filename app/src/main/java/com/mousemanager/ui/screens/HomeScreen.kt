@@ -59,7 +59,6 @@ fun HomeScreen(
     val bridge = remember { ServiceBridge() }
     val masterState = homeMasterState(
         status = status,
-        runtime = runtime,
         error = error,
         canArm = bridge.canArm(),
     )

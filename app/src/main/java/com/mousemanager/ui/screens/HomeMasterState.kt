@@ -1,6 +1,5 @@
 package com.mousemanager.ui.screens
 
-import com.mousemanager.core.RuntimeConfig
 import com.mousemanager.data.ConfigError
 import com.mousemanager.service.ServiceStatus
 
@@ -39,14 +38,19 @@ data class HomeMasterState(
  * состояний (служба, фильтр, конфигурация, готовность моста) проверяет JVM-тест
  * `HomeMasterStateTest`.
  *
- * [canArm] — вердикт `ServiceBridge.canArm()`: он включает доступность движка и
- * fail-safe проверки, которые UI не должен повторять самостоятельно. Поэтому при
- * выполненных видимых условиях, но закрытом мосте, причина — [HomeMasterReason.ENGINE_UNAVAILABLE].
+ * Готовность конфигурации берётся из наблюдаемого [ServiceStatus.configGeneration],
+ * а не из `RuntimeConfig` и не из движка: служба применяет конфиг асинхронно, и
+ * только зеркало в `StateFlow` гарантирует перерисовку в тот момент, когда генерация
+ * действительно записана. Поэтому `CONFIG_LOADING` не «залипает» и не превращается в
+ * ложный `ENGINE_UNAVAILABLE`.
+ *
+ * [canArm] — вердикт `ServiceBridge.canArm()`: он включает проверку доступности
+ * движка, которую UI не должен повторять самостоятельно. Поэтому при выполненных
+ * видимых условиях, но закрытом мосте, причина — [HomeMasterReason.ENGINE_UNAVAILABLE].
  * Окончательное решение всё равно принимает `ServiceBridge.setArmed`.
  */
 fun homeMasterState(
     status: ServiceStatus,
-    runtime: RuntimeConfig,
     error: ConfigError?,
     canArm: Boolean,
 ): HomeMasterState {
@@ -54,7 +58,7 @@ fun homeMasterState(
         !status.connected -> HomeMasterReason.SERVICE_DISCONNECTED
         !status.filterApplied -> HomeMasterReason.FILTER_MISSING
         error != null -> HomeMasterReason.CONFIG_ERROR
-        runtime.generation == 0L -> HomeMasterReason.CONFIG_LOADING
+        status.configGeneration == 0L -> HomeMasterReason.CONFIG_LOADING
         !canArm -> HomeMasterReason.ENGINE_UNAVAILABLE
         else -> null
     }

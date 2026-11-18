@@ -18,12 +18,19 @@ import kotlinx.coroutines.flow.update
  * вместе с реальным `setArmed(...)`; источник истины для горячего пути — по-прежнему
  * движок. Поле не сохраняется и всегда `false` при подключении службы и старте
  * процесса (D-006).
+ *
+ * [configGeneration] — **зеркало** `RemapEngine.config.generation` для UI (M2.4).
+ * Движок пишет конфиг асинхронно, уже после публикации подключения, поэтому UI нужен
+ * наблюдаемый признак готовности: без него Home мог показать «служба ещё не готова»
+ * и не перерисоваться после фактического применения конфигурации. Значение `0`
+ * означает, что текущая сессия ещё не применила ни одного снимка.
  */
 data class ServiceStatus(
     val connected: Boolean = false,
     val appliedFlags: Int = 0,
     val connectedAt: Long = 0L,
     val armed: Boolean = false,
+    val configGeneration: Long = 0L,
 ) {
     val filterApplied: Boolean
         get() = (appliedFlags and AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS) != 0
@@ -39,7 +46,8 @@ object ServiceState {
     /**
      * Подключение службы никогда не включает перехват: создаётся новый статус, в
      * котором `armed` получает значение по умолчанию `false`, независимо от прошлого
-     * состояния (D-006, D-031).
+     * состояния (D-006, D-031). `configGeneration` тоже сбрасывается: новая сессия
+     * ещё ничего не применила, даже если UI уже видит готовый `RuntimeConfig`.
      */
     internal fun onConnected(appliedFlags: Int, now: Long = System.currentTimeMillis()) {
         _status.value = ServiceStatus(
@@ -57,7 +65,16 @@ object ServiceState {
         _status.update { it.copy(armed = armed) }
     }
 
-    /** Остановка службы сбрасывает и подключение, и зеркало `armed`. */
+    /**
+     * Публикует генерацию конфигурации, фактически записанной в движок. Вызывается
+     * службой сразу после `engine.config = runtime`, чтобы Home увидел готовность
+     * через наблюдаемое состояние, а не чтением движка во время композиции.
+     */
+    internal fun onConfigApplied(generation: Long) {
+        _status.update { it.copy(configGeneration = generation) }
+    }
+
+    /** Остановка службы сбрасывает подключение, зеркало `armed` и готовность конфига. */
     internal fun onStopped() {
         _status.value = ServiceStatus()
     }

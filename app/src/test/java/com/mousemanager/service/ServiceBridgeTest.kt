@@ -35,12 +35,24 @@ class ServiceBridgeTest {
     }
 
     @Test
-    fun `unpublished config cannot arm`() {
-        val h = Harness(engine = engineWithGeneration(0L))
+    fun `unpublished config mirror cannot arm`() {
+        val h = Harness(configGeneration = 0L)
 
         assertFalse(h.bridge.canArm())
         assertFalse(h.bridge.setArmed(true))
         assertFalse(h.engine!!.armed)
+    }
+
+    @Test
+    fun `engine without config rejects arming even when the mirror is ready`() {
+        // Зеркало обновилось, а движок ещё (или уже) без конфига: окончательное
+        // решение принимает setArmed по engine.config.generation.
+        val h = Harness(configGeneration = 1L, engine = engineWithGeneration(0L))
+
+        assertTrue(h.bridge.canArm())
+        assertFalse(h.bridge.setArmed(true))
+        assertFalse(h.engine!!.armed)
+        assertEquals(listOf(false), h.mirrored)
     }
 
     @Test
@@ -160,6 +172,7 @@ class ServiceBridgeTest {
     private class Harness(
         var connected: Boolean = true,
         var filterApplied: Boolean = true,
+        var configGeneration: Long = 1L,
         val engine: RemapEngine? = engineWithGeneration(1L),
     ) {
         val mirrored = mutableListOf<Boolean>()
@@ -179,6 +192,7 @@ class ServiceBridgeTest {
                     connected = connected,
                     appliedFlags = if (filterApplied) FILTER_FLAG else 0,
                     connectedAt = 1L,
+                    configGeneration = configGeneration,
                 )
             },
             armedMirror = {

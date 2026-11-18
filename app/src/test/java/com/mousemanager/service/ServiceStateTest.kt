@@ -27,6 +27,38 @@ class ServiceStateTest {
         assertFalse(status.connected)
         assertFalse(status.filterApplied)
         assertFalse(status.armed)
+        assertEquals(0L, status.configGeneration)
+    }
+
+    @Test
+    fun `config generation starts unpublished and is published by the service`() {
+        ServiceState.onConnected(appliedFlags = FILTER_FLAG, now = 1L)
+        assertEquals(0L, ServiceState.status.value.configGeneration)
+
+        ServiceState.onConfigApplied(7L)
+
+        assertEquals(7L, ServiceState.status.value.configGeneration)
+        assertTrue(ServiceState.status.value.connected)
+    }
+
+    @Test
+    fun `reconnecting resets the config generation`() {
+        ServiceState.onConnected(appliedFlags = FILTER_FLAG, now = 1L)
+        ServiceState.onConfigApplied(3L)
+
+        ServiceState.onConnected(appliedFlags = FILTER_FLAG, now = 2L)
+
+        assertEquals(0L, ServiceState.status.value.configGeneration)
+    }
+
+    @Test
+    fun `stopping the service resets the config generation`() {
+        ServiceState.onConnected(appliedFlags = FILTER_FLAG, now = 1L)
+        ServiceState.onConfigApplied(4L)
+
+        ServiceState.onStopped()
+
+        assertEquals(0L, ServiceState.status.value.configGeneration)
     }
 
     @Test

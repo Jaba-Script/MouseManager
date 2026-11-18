@@ -761,6 +761,7 @@ class MouseManagerService : AccessibilityService() {
     private fun applyConfigNow(session: Long, runtime: RuntimeConfig) {
         if (session != configSession) return   // коллектор прошлой сессии ничего не меняет
         engine.config = runtime
+        ServiceState.onConfigApplied(runtime.generation)  // наблюдаемое зеркало для UI
         syncDisarm(runtime.generation)
     }
 
@@ -806,12 +807,25 @@ data class ServiceStatus(
     val filterApplied: Boolean,   // appliedFlags and FLAG_REQUEST_FILTER_KEY_EVENTS != 0
     val connectedAt: Long,
     val armed: Boolean,           // зеркало engine.armed для UI (D-031)
+    val configGeneration: Long,   // зеркало engine.config.generation (D-031 п. 31.14)
 )
 ```
 
 Служба и Activity по умолчанию в одном процессе, поэтому синглтон работает без binder'а.
 Если когда-нибудь появится `android:process`, потребуется Messenger/AIDL — сейчас не
 нужно.
+
+**Публикация конфигурации.** Коллектор `ConfigStore.runtime` работает на
+`Dispatchers.Default`, поэтому запись в движок идёт не в момент подключения, а на
+следующем проходе main-`Handler` (по логам — 34 мс). Порядок в `applyConfigNow`:
+`engine.config = runtime` → `ServiceState.onConfigApplied(runtime.generation)` →
+`syncDisarm(runtime.generation)`. `configGeneration` нужен именно потому, что
+`engine.config` — обычное поле: без зеркала в `StateFlow` Compose не узнал бы о
+применении конфига и мог бы оставить на Home ложную причину `ENGINE_UNAVAILABLE` до
+любой другой перерисовки. `onConnected()` создаёт статус с `configGeneration = 0`
+(новая сессия ещё ничего не применила), `onStopped()` сбрасывает статус целиком.
+Зеркало — только для наблюдения: включение Master всё равно проверяет движок
+(`ServiceBridge.setArmed` ниже).
 
 `EngineHolder` (M2.3.3) — process-wide синглтон в `service/`, хранящий только ссылку
 на текущий `RemapEngine`:
@@ -850,9 +864,13 @@ class ServiceBridge(
 
 - Мост не создаёт и не хранит `RemapEngine`: читает `EngineHolder.engine`, статус —
   из `ServiceState.status`, зеркало пишет через `ServiceState.onArmed`.
-- Гейт включения: подключённая служба, `filterApplied == true`,
-  `engine.config.generation > 0`, доступный движок. `canArm()` проверяет его для UI,
-  `setArmed(true)` — повторно в момент вызова.
+- Гейт включения двухуровневый:
+  - `canArm()` для доступности тумблера читает только наблюдаемые поля
+    (`connected`, `filterApplied`, `ServiceStatus.configGeneration > 0`) и наличие
+    движка; `engine.config` не читается, чтобы UI перерисовывался по `StateFlow`;
+  - `setArmed(true)` повторяет эти условия в момент вызова и дополнительно требует
+    `engine.config.generation > 0`. Зеркало `configGeneration` не является источником
+    истины для включения: расхождение всегда решается в пользу движка.
 - Выключение разрешено всегда и немедленно; если движок недоступен, обновляется
   только зеркало. Включение при недоступном движке или исключении даёт `armed=false`;
   причина передаётся в `logError`, наружу исключение не выходит (D-018).
@@ -879,8 +897,11 @@ callback. Устаревший callback не выключает перехват
 **Гейт включения (M2.4).** UI и `ServiceBridge` не разрешают включение только по
 `EngineHolder.engine != null`: holder публикует движок до проверки фильтра и не
 отражает остановку процесса/службы. Включение разрешено лишь при активном состоянии
-службы, `ServiceState.status.filterApplied == true`, опубликованном конфиге
-(`generation > 0`) и доступном движке; при любом сомнении — `armed = false`.
+службы, `ServiceState.status.filterApplied == true`, применённом конфиге
+(`ServiceStatus.configGeneration > 0` для UI) и доступном движке; при любом сомнении —
+`armed = false`. Окончательное решение `setArmed(true)` дополнительно сверяет
+`engine.config.generation > 0`, поэтому наблюдаемое зеркало ускоряет реакцию UI, но не
+заменяет проверку источника истины.
 
 **Идемпотентность.** `onServiceConnected` может вызываться повторно (переподключение).
 Подписка каждый раз перезапускается с новым `configSession`, поэтому активным
@@ -935,14 +956,13 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 Реализовано в M2.4 (D-031). `HomeScreen` читает `ServiceState.status` и
 `ConfigStore.runtime`/`error`, а `armed` меняет только через `ServiceBridge`.
 
-Чистая `homeMasterState(status, runtime, error, canArm)` возвращает
-`HomeMasterState`:
+Чистая `homeMasterState(status, error, canArm)` возвращает `HomeMasterState`:
 
 - `checked = status.armed`;
 - `enabled = reason == null`;
 - `reason` — первая причина по порядку: служба не подключена, фильтр не применён,
-  ошибка конфигурации, конфигурация загружается (`generation == 0`), мост/движок не
-  готов (`canArm == false`);
+  ошибка конфигурации, конфигурация ещё не применена
+  (`status.configGeneration == 0`), мост/движок не готов (`canArm == false`);
 - `requiresConfirmation = enabled && !checked`.
 
 Поведение UI:
@@ -955,7 +975,11 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
   закрытом гейте нельзя;
 - наличие `EngineHolder.engine != null` само по себе включение не разрешает: гейт
   проверяется в `ServiceBridge.canArm()`/`setArmed()` и включает `filterApplied`,
-  `generation > 0` и доступность движка (D-030 п. 30.12, D-031).
+  применённый конфиг (`configGeneration > 0` для UI и `engine.config.generation > 0`
+  в момент включения) и доступность движка (D-030 п. 30.12, D-031 п. 31.4, 31.14);
+- готовность конфигурации приходит через `ServiceState.status`, поэтому после
+  применения конфига причина `CONFIG_LOADING`/`ENGINE_UNAVAILABLE` исчезает сама, без
+  смены вкладки или другого действия пользователя.
 
 Известное замечание (P2): если гейт закрывается между открытием диалога и
 подтверждением, `setArmed(true)` возвращает `false` без отдельного сообщения —
@@ -1047,8 +1071,8 @@ ViewModel. Экраны S7: Home, Devices, Diagnostics, About. Mappings и Profi
 `KeyEventHandler`, `ServiceBridge`, `DisarmGuard` и `HomeMasterState` не зависят от
 Android-рантайма (Android-обвязка и провайдеры внедряются лямбдами), поэтому
 тестируются обычным JUnit. `ServiceState` использует только константу флага Android,
-доступную в unit-тестах. Всего в M2.4 — **214 тестов в 19 suites**, 0 failures /
-0 errors / 0 skipped:
+доступную в unit-тестах. Всего в M2.4 (после исправления A) — **220 тестов в 19
+suites**, 0 failures / 0 errors / 0 skipped:
 
 | Тест | Ожидание |
 |---|---|
@@ -1100,13 +1124,16 @@ Android-рантайма (Android-обвязка и провайдеры вне�
 | нет привязки | активный профиль |
 | нет активного | default |
 | нет маппинга | `Pass(NO_MAPPING)` |
-| `ServiceBridge`: гейт | нет службы / фильтра / `generation > 0` / движка → `canArm=false`, включение отклонено |
+| `ServiceBridge`: гейт | нет службы / фильтра / `configGeneration > 0` / движка → `canArm=false`, включение отклонено |
+| `ServiceBridge`: окончательная проверка | готовое зеркало при `engine.config.generation == 0` → `canArm=true`, но `setArmed(true)` отклонён |
 | `ServiceBridge`: включение | при выполненном гейте движок и зеркало получают `true` в одном вызове |
 | `ServiceBridge`: выключение | разрешено всегда; при недоступном движке обновляется только зеркало |
 | `ServiceBridge`: ошибки | исключения провайдеров, зеркала и логгера не выходят наружу, итог — `armed=false` |
 | `ServiceState`: зеркало `armed` | `false` по умолчанию, `onStopped()` сбрасывает, переподключение не восстанавливает |
+| `ServiceState`: `configGeneration` | публикуется `onConfigApplied`, сбрасывается при переподключении и остановке |
 | `DisarmGuard` | disarm только при совпадении токена сессии и `generation == 0` |
 | `HomeMasterState` | `checked`/`enabled`/`reason`/`requiresConfirmation` по состояниям службы, фильтра, конфига и `canArm` |
+| `HomeMasterState`: готовность конфига | `CONFIG_LOADING` до публикации `configGeneration`, причина исчезает после неё; ложного `ENGINE_UNAVAILABLE` нет |
 
 Плюс тесты `ConfigCodec`: round-trip, неизвестное действие, битый JSON, миграция версий.
 
@@ -1134,7 +1161,10 @@ Android-рантайма (Android-обвязка и провайдеры вне�
     VOLUME_UP/DOWN доказывают только фильтрацию по устройству, а не совместимость с
     полноценной клавиатурой.
 14. M2.4: тумблер включается/выключается; без маппингов ничего не гасится; после
-    переподключения службы — `armed=false`.
+    переподключения службы — `armed=false`. После включения службы в настройках и
+    возврата в приложение Home не показывает «Служба ещё не готова к перехвату»:
+    готовность конфига приходит наблюдаемым `configGeneration` без смены вкладки
+    (исправление A).
 15. M2.6: первый маппинг `Ctrl+C → BACK`; «голый Ctrl» — по чек-листу ниже.
 16. Фоновая доставка: другое приложение на переднем плане, нажатие боковой кнопки;
     зафиксировать `descriptor` и `decision`; повторить после выключения/включения экрана.
@@ -1145,6 +1175,8 @@ Android-рантайма (Android-обвязка и провайдеры вне�
 
 Пункт 14 — единственная незакрытая часть M2.4: JVM-тесты не покрывают lifecycle
 службы и живой фильтр; проверка выполняется только по отдельному разрешению.
+Исправление A (наблюдаемая готовность конфига) в JVM покрыто, но на устройстве ещё
+не проверялось.
 
 **Чек-лист «голого Ctrl» (к пункту 15).**
 

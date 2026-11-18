@@ -1463,10 +1463,12 @@ dispatch. Если запись `CONSUMED` не удалась, событие �
 ## D-031 — M2.4: мастер-переключатель, наблюдаемое `armed` и `ServiceBridge`
 
 **Статус:** Accepted (подтверждено пользователем 2026-11-17, M2.4) и **реализовано**
-2026-11-17 в двух кодовых блоках M2.4; JVM-тесты — **214 в 19 suites**, 0 failures /
-0 errors / 0 skipped. Реализация и документация **закоммичены** — `2a6ccf6`
-«feat: implement M2.4 master switch and home» (не опубликован). Проверка на устройстве
-не выполнялась: **M2.4 не принят по device-check**.
+2026-11-17 в двух кодовых блоках M2.4; исправление A (наблюдаемая готовность
+конфигурации) внесено 2026-11-18. JVM-тесты — **220 в 19 suites**, 0 failures /
+0 errors / 0 skipped. Реализация и документация **закоммичены и опубликованы** —
+`2a6ccf6` «feat: implement M2.4 master switch and home» и `46b5f4e` «docs: sync M2.4
+status after implementation commit»; исправление A в `origin/main` ещё не входит.
+Проверка на устройстве не выполнялась: **M2.4 не принят по device-check**.
 
 **Контекст.** `armed` — `@Volatile`-поле `RemapEngine` с публичным `setArmed(Boolean)`.
 Compose не может наблюдать обычное поле, а UI не должен писать в движок напрямую: при
@@ -1492,11 +1494,13 @@ D-030 п. 30.12 запрещает разрешать включение тол�
 Экран не вызывает `RemapEngine.setArmed`, не пишет `ServiceState` и не создаёт
 собственных экземпляров движка.
 
-31.4. `ServiceBridge` повторно проверяет условия включения при каждом запросе:
-служба подключена; `ServiceState.status.filterApplied == true`; конфиг опубликован
-(`generation > 0`); движок доступен (`EngineHolder.engine != null`). Проверка
-выполняется в момент включения, а не только в UI: состояние могло измениться между
-отрисовкой и нажатием.
+31.4. `ServiceBridge` проверяет условия включения на двух уровнях. Наблюдаемый гейт
+`canArm()` (только для доступности тумблера) читает `connected`, `filterApplied`,
+`ServiceStatus.configGeneration > 0` и проверяет наличие `EngineHolder.engine`;
+`engine.config` при этом не читается, поэтому Compose перерисовывается сразу после
+применения конфига. Окончательная проверка `setArmed(true)` в момент вызова повторяет
+те же условия и отдельно читает `engine.config.generation > 0` — источник истины
+остаётся за движком.
 
 31.5. Выключение разрешено всегда и выполняется немедленно, даже если гейт не
 выполнен или движок недоступен. В последнем случае обновляется только зеркало:
@@ -1540,33 +1544,53 @@ D-030 п. 30.12 запрещает разрешать включение тол�
 сомнение — `armed=false`, тумблер неактивен с честной причиной. Включение никогда не
 происходит «по умолчанию» и не восстанавливается после переподключения.
 
+31.14. **Наблюдаемая готовность конфигурации.** `ServiceStatus.configGeneration:
+Long = 0L` — зеркало `engine.config.generation`. Служба вызывает
+`ServiceState.onConfigApplied(generation)` в `applyConfigNow` сразу после
+`engine.config = runtime`; порядок записей — `engine.config` → `onConfigApplied` →
+`syncDisarm`. `onConnected()` создаёт новый статус с `configGeneration = 0` (новая
+сессия ещё ничего не применила), `onStopped()` сбрасывает статус целиком. Зеркало
+существует только для наблюдения UI: **источником истины для включения Master оно не
+является** — `setArmed(true)` всё равно проверяет `engine.config.generation`. Причина
+`ENGINE_UNAVAILABLE` при этом показывается только после публикации конфига, а до неё
+Home честно сообщает `CONFIG_LOADING`.
+
 **Реализация (2026-11-17).**
 
 - `service/ServiceBridge.kt` — `canArm()` и `setArmed(armed): Boolean`. Зависимости
   (`engineProvider`, `statusProvider`, `armedMirror`, `logError`) внедряются; по
   умолчанию мост читает `EngineHolder.engine` и `ServiceState.status.value`, а зеркало
-  пишет через `ServiceState.onArmed`. `setArmed` возвращает фактическое состояние
-  `armed`: выключение всегда даёт `false`, включение — `true` только при выполненном
-  гейте. Ошибки включения логируются и приводят к `disarm()`; исключения наружу не
-  выходят. Класс помечен `@MainThread` и не хранит собственный движок.
+  пишет через `ServiceState.onArmed`. `canArm()` читает только наблюдаемые поля
+  (`connected`, `filterApplied`, `configGeneration > 0`) и наличие движка;
+  `setArmed(true)` дополнительно проверяет `engine.config.generation > 0`. `setArmed`
+  возвращает фактическое состояние `armed`: выключение всегда даёт `false`, включение
+  — `true` только при выполненном гейте. Ошибки включения логируются и приводят к
+  `disarm()`; исключения наружу не выходят. Класс помечен `@MainThread` и не хранит
+  собственный движок.
 - `service/DisarmGuard.kt` — чистая `shouldDisarm(scheduledSession, currentSession,
   generation)`: `true` только при совпадении токена и `generation == 0`.
 - `ServiceState`: `ServiceStatus.armed` (по умолчанию `false`), `internal onArmed`,
   сброс в `onStopped`; `onConnected` создаёт новый статус с `armed=false`.
+  С исправлением A: `ServiceStatus.configGeneration` (по умолчанию `0`) и
+  `internal onConfigApplied(generation)`, публикующий зеркало через тот же
+  `StateFlow`; `onConnected`/`onStopped` сбрасывают готовность конфига.
 - `MouseManagerService`: поле `bridge` с `Log.e` в `logError`; в `onServiceConnected`
   сначала `EngineHolder.attach(engine)`, затем `bridge.setArmed(false)`, `resetState`,
   `config = EMPTY`, `foregroundPackage = null`. Все disarm (подключение, отсутствие
   фильтра, ошибка `onKeyEvent`, `stopSession`, `disarmIfEmpty`) идут через мост;
   `stopSession` увеличивает `configSession` до записей и снимает callback.
   `disarmIfEmpty` захватывает `disarmSession` при планировании и вызывает
-  `DisarmGuard.shouldDisarm`.
+  `DisarmGuard.shouldDisarm`. В `applyConfigNow` после записи `engine.config` идёт
+  `ServiceState.onConfigApplied(runtime.generation)`, затем `syncDisarm`.
 - `KeyEventHandler`: параметр `disarm: () -> Unit` (по умолчанию
   `engine.setArmed(false)`); служба передаёт `{ bridge.setArmed(false) }`. Порядок
   `CONSUMED → dispatch → ACTION_FAILED` не менялся.
-- `ui/screens/HomeMasterState.kt` — чистая `homeMasterState(status, runtime, error,
-  canArm)`: причины `SERVICE_DISCONNECTED`, `FILTER_MISSING`, `CONFIG_ERROR`,
-  `CONFIG_LOADING`, `ENGINE_UNAVAILABLE`; `checked = status.armed`,
-  `enabled = reason == null`, `requiresConfirmation = enabled && !checked`.
+- `ui/screens/HomeMasterState.kt` — чистая `homeMasterState(status, error, canArm)`:
+  причины `SERVICE_DISCONNECTED`, `FILTER_MISSING`, `CONFIG_ERROR`, `CONFIG_LOADING`,
+  `ENGINE_UNAVAILABLE`; `checked = status.armed`, `enabled = reason == null`,
+  `requiresConfirmation = enabled && !checked`. `CONFIG_LOADING` определяется по
+  наблюдаемому `status.configGeneration == 0`, а не по `RuntimeConfig`: готовность
+  приходит тем же `StateFlow`, что и остальной статус.
 - `ui/screens/HomeScreen.kt` — переключатель читает `ServiceState`, включает только
   после `AlertDialog`; выключение вызывает `bridge.setArmed(false)` сразу. При
   включённом перехвате переключатель остаётся доступным для выключения; рядом —
@@ -1577,6 +1601,10 @@ D-030 п. 30.12 запрещает разрешать включение тол�
 
 - Зеркало в `ServiceState` даёт Compose наблюдаемое состояние без coroutines в `core`
   и без изменения горячего пути.
+- `configGeneration` закрывает окно между публикацией подключения и асинхронной
+  записью `engine.config`: гейт для UI стал наблюдаемым, ложная причина
+  `ENGINE_UNAVAILABLE` больше не «залипает» до смены вкладки. Окончательная проверка
+  по движку сохранена, поэтому наблюдаемость не ослабляет защиту.
 - Один публичный путь (`ServiceBridge`) исключает рассинхронизацию: любое включение и
   выключение проходит через одну проверку и одну запись.
 - Проверка гейта в момент действия, а не только при отрисовке, закрывает окно между
@@ -1601,30 +1629,63 @@ D-030 п. 30.12 запрещает разрешать включение тол�
 **Следствия.**
 
 - Созданы: `service/ServiceBridge.kt`, `service/DisarmGuard.kt`,
-  `ui/screens/HomeMasterState.kt`; тесты `ServiceBridgeTest` (14),
-  `DisarmGuardTest` (5), `HomeMasterStateTest` (10).
-- Изменены: `service/ServiceState.kt` (+3 теста), `service/MouseManagerService.kt`,
-  `service/KeyEventHandler.kt` (+2 теста), `ui/screens/HomeScreen.kt`,
-  `strings.xml`.
+  `ui/screens/HomeMasterState.kt`; тесты `ServiceBridgeTest` (15),
+  `DisarmGuardTest` (5), `HomeMasterStateTest` (12).
+- Изменены: `service/ServiceState.kt` (+3 теста в блоке 1, +3 в исправлении A),
+  `service/MouseManagerService.kt`, `service/KeyEventHandler.kt` (+2 теста),
+  `ui/screens/HomeScreen.kt`, `strings.xml`.
 - `ARCHITECTURE.md` §11, §12.1, §16.1–§16.2 обновлены по факту кода.
-- Реализация и документация закоммичены: `2a6ccf6` «feat: implement M2.4 master
-  switch and home» (17 файлов, +1312/−112); коммит не опубликован.
+- Реализация и документация закоммичены и опубликованы: `2a6ccf6` «feat: implement
+  M2.4 master switch and home» (17 файлов, +1312/−112) и `46b5f4e` «docs: sync M2.4
+  status after implementation commit» (3 документа, +23/−16).
+- Исправление A (2026-11-18) — в рабочем дереве, не закоммичено; меняет только
+  наблюдаемость готовности конфига, не трогая `RemapEngine`, `KeyEventHandler` и
+  порядок обработки клавиш.
 - Проверка на устройстве (п. 14 чек-листа §16.2) не выполнялась: отдельная задача,
   требует отдельного разрешения; до неё M2.4 не принят.
 
-**Проверки (JVM, выполнены 2026-11-17).** `ServiceBridgeTest` (14): отказ гейта при
-неподключённой службе, отсутствии фильтра, `generation == 0` и недоступном движке;
-повторная проверка в момент включения; успешное включение; выключение разрешено
-всегда, в том числе без движка; зеркало и движок меняются вместе; идемпотентность;
-исключения провайдеров, зеркала и логгера не выходят наружу; ошибка включения
-логируется. `ServiceStateTest` (6): `armed=false` по умолчанию, обновление зеркала,
-сброс в `onStopped()`, отсутствие восстановления после переподключения.
-`DisarmGuardTest` (5): устаревшая сессия не выключает новую, опубликованный конфиг
-блокирует disarm, начальный токен `0` — валидная сессия. `KeyEventHandlerTest` (17):
-ошибка движка вызывает callback, сбой callback изолирован. `HomeMasterStateTest` (10):
-доступность и причина по состояниям службы, фильтра и конфигурации; необходимость
-подтверждения; сохранение `checked` при закрытом гейте. Итог:
-**214 тестов в 19 suites, 0 failures / 0 errors / 0 skipped**.
+**Проверки (JVM, выполнены 2026-11-17; обновлены 2026-11-18).** `ServiceBridgeTest`
+(15): отказ гейта при неподключённой службе, отсутствии фильтра, `configGeneration == 0`,
+`engine.config.generation == 0` и недоступном движке; повторная проверка в момент
+включения; движок без конфига отклоняет включение даже при готовом зеркале; успешное
+включение; выключение разрешено всегда, в том числе без движка; зеркало и движок
+меняются вместе; идемпотентность; исключения провайдеров, зеркала и логгера не выходят
+наружу; ошибка включения логируется. `ServiceStateTest` (9): `armed=false` по
+умолчанию, обновление зеркала, сброс в `onStopped()`, отсутствие восстановления после
+переподключения; публикация `configGeneration` и её сброс при переподключении и
+остановке. `DisarmGuardTest` (5): устаревшая сессия не выключает новую, опубликованный
+конфиг блокирует disarm, начальный токен `0` — валидная сессия. `KeyEventHandlerTest`
+(17): ошибка движка вызывает callback, сбой callback изолирован. `HomeMasterStateTest`
+(12): доступность и причина по состояниям службы, фильтра и конфигурации;
+необходимость подтверждения; сохранение `checked` при закрытом гейте; исчезновение
+`CONFIG_LOADING` после публикации `configGeneration` и отсутствие ложного
+`ENGINE_UNAVAILABLE` до применения конфига. Итог:
+**220 тестов в 19 suites, 0 failures / 0 errors / 0 skipped**.
+
+**Исправление A (2026-11-18).**
+
+- **Причина.** `ServiceState.onConnected()` публиковал `connected=true` до того, как
+  служба записывала `engine.config` (запись идёт через `Dispatchers.Default` и
+  `mainHandler.post`, по логам — 34 мс). `canArm()` читал
+  `engine.config.generation`, которое Compose не наблюдает, поэтому Home успевал
+  показать `ENGINE_UNAVAILABLE` и не перерисовывался после применения конфига;
+  сообщение исчезало только при смене вкладки.
+- **Решение.** Добавлено наблюдаемое зеркало `ServiceStatus.configGeneration` и
+  `ServiceState.onConfigApplied(generation)`; служба публикует генерацию сразу после
+  записи конфига; `homeMasterState` определяет `CONFIG_LOADING` по зеркалу;
+  `canArm()` читает только наблюдаемые поля, а `setArmed(true)` сохраняет
+  окончательную проверку `engine.config.generation`.
+- **Границы.** `RemapEngine`, `KeyEventHandler` и `Flow` конфигурации не менялись.
+  `MouseManagerService` изменён только для публикации зеркала конфигурации: lifecycle,
+  применение фильтра и порядок обработки клавиш не затрагивались. Проблема B не
+  затрагивалась.
+- **Тесты (2026-11-18).** `:app:testDebugUnitTest` — **220 тестов в 19 suites**,
+  0 failures / 0 errors / 0 skipped; прирост +6: `ServiceStateTest` +3 (публикация и
+  сброс `configGeneration`), `ServiceBridgeTest` +1 (движок без конфига отклоняет
+  включение при готовом зеркале; тест `generation == 0` разделён на зеркало и движок),
+  `HomeMasterStateTest` +2 (исчезновение ожидания после публикации генерации,
+  отсутствие ложного `ENGINE_UNAVAILABLE`). Существующие тесты сохранены.
+- **Статус.** Правка в рабочем дереве, не закоммичена; на устройстве не проверялась.
 
 **Известные замечания (не блокируют M2.4).**
 
@@ -1638,3 +1699,12 @@ D-030 п. 30.12 запрещает разрешать включение тол�
   identity-проверка защищает только `ServiceState.onStopped`. При штатном порядке
   Android (`onDestroy` старой службы до `onServiceConnected` новой) это безопасно;
   ownership-проверка disarm остаётся потенциальным улучшением.
+- Открыто (проблема B): **причина очистки системных настроек не установлена.**
+  Подтверждено логами: наблюдался `force-stop` процесса приложения с причиной
+  `SwipeUpClean` (HyperOS `ProcessSceneCleaner`); после этого зафиксировано состояние
+  `enabled_accessibility_services=null` и `accessibility_enabled=0`, то есть
+  Accessibility Service оказалась выключенной. Не установлено: кто и почему очистил
+  системные настройки и была ли эта очистка непосредственным следствием `force-stop`.
+  Кода отключения службы в приложении нет; исправление не входило в задачу A и не
+  выполнялось. Нужен отдельный шаг: детекция выключенной службы при старте и явный
+  путь восстановления.
