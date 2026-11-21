@@ -1462,19 +1462,20 @@ dispatch. Если запись `CONSUMED` не удалась, событие �
 
 ## D-031 — M2.4: мастер-переключатель, наблюдаемое `armed` и `ServiceBridge`
 
-**Статус:** Accepted (подтверждено пользователем 2026-11-17, M2.4) и **реализовано**
+**Статус:** Accepted (подтверждено пользователем 2026-11-17) и **реализовано**
 2026-11-17 в двух кодовых блоках M2.4; исправление A (наблюдаемая готовность
 конфигурации) внесено 2026-11-18, закоммичено `de5e203` и **прошло device-check
 2026-11-19** (3 PASS). **Device-check M2.4 по п. 14 §16.2 пройден 2026-11-20**
-(переподключение службы, `armed=false`, отсутствие поглощения без mappings). JVM-тесты —
-**220 в 19 suites**, 0 failures / 0 errors / 0 skipped (повторный полный прогон
-2026-11-19). Реализация и документация M2.4 **закоммичены и опубликованы** — `2a6ccf6`
-«feat: implement M2.4 master switch and home», `46b5f4e` «docs: sync M2.4 status after
-implementation commit», `de5e203` «fix: publish config readiness to service state» и
-`d885a50` «docs: sync status after fix commit».
-M2.4 **не объявлен полностью принятым**: на устройстве не проверены перезапуск
-процесса (`armed=false` после старта) и проход при пустых `targets`
-(`PASSED_NO_TARGETS`); проблема B остаётся открытой.
+(переподключение службы, `armed=false`, отсутствие поглощения без mappings); в тот же
+день на устройстве закрыты два оставшихся критерия — `armed=false` в новом процессе и
+`PASSED_NO_TARGETS` при пустых `targets`. **Все критерии M2.4 проверены, этап
+завершён.** JVM-тесты — **220 в 19 suites**, 0 failures / 0 errors / 0 skipped
+(повторный полный прогон 2026-11-19). Реализация и документация M2.4 **закоммичены и
+опубликованы** — `2a6ccf6` «feat: implement M2.4 master switch and home», `46b5f4e`
+«docs: sync M2.4 status after implementation commit», `de5e203` «fix: publish config
+readiness to service state», `d885a50` «docs: sync status after fix commit» и `b5aeb71`
+«docs: document HyperOS accessibility service issue». Проблема B (служба отключается
+после `force-stop`) остаётся открытой.
 
 **Контекст.** `armed` — `@Volatile`-поле `RemapEngine` с публичным `setArmed(Boolean)`.
 Compose не может наблюдать обычное поле, а UI не должен писать в движок напрямую: при
@@ -1715,8 +1716,20 @@ Service — PASS; (2) после переподключения Master Switch о
 `PASSED_DISARMED` 40, `PASSED_MODIFIER` 4, `PASSED_KEY_UP` 2, `PASSED_NO_MAPPING` 2,
 `CONSUMED` 0. Ошибок `PASSED_ERROR`/`ACTION_FAILED` и сообщений `W`/`E` с тегом
 `MouseManager` нет. Отсутствие `CONSUMED` ожидаемо: mappings пока нельзя создать в UI
-(это M2.6). Проверка выполнялась без удаления приложения из Recents; проблема B
-повторно не проверялась.
+(это M2.6). Проверка выполнялась без удаления приложения из Recents.
+
+**Дополнительная проверка M2.4 (2026-11-20): пустые `targets` и перезапуск процесса.**
+Выбор снят со всех устройств, Master Switch включён через диалог: `Ctrl+C` и `Ctrl+V`
+дали **8 записей `PASSED_NO_TARGETS`** (по 4 события на аккорд), `CONSUMED` 0,
+`PASSED_ERROR`/`ACTION_FAILED` нет; конфиг в логе — `generation=2 targets=0`.
+Затем процесс завершён `adb shell am force-stop` (PID 7839 → **5872**), Accessibility
+Service отключилась (`accessibility_enabled=0`, `enabled_accessibility_services=null`)
+и была включена вручную; после подключения — `onServiceConnected flags=0x20
+filterApplied=true`, `config generation=1 targets=1`, `KeyboardInterceptor` активен.
+Одно нажатие боковой кнопки дало **4 записи `PASSED_DISARMED`** с `armed=false` и
+`target=true` (`desc=ce5035b0…3992`, `deviceId` сменился 71 → 74), `CONSUMED` 0,
+ошибок нет. Master Switch оставался OFF по подтверждению пользователя. Итог: `armed`
+не восстановлен из хранилища в новом процессе — PASS.
 
 **Известные замечания (не блокируют M2.4).**
 
@@ -1731,10 +1744,10 @@ Service — PASS; (2) после переподключения Master Switch о
   Android (`onDestroy` старой службы до `onServiceConnected` новой) это безопасно;
   ownership-проверка disarm остаётся потенциальным улучшением.
 - Открыто (проблема B): **инициатор сброса системных настроек не установлен.**
-  Сценарий воспроизведён дважды — 2026-11-19 23:53:32 и 2026-11-20 00:42:21:
-  `force-stop` процесса приложения с причиной `SwipeUpClean` (HyperOS
-  `ProcessSceneCleaner`), затем через **47 и 63 мс** `BatterySaverPolicy` сообщает
-  `accessibility changed to false`. Read-only снимок после второго эпизода:
+  Сценарий воспроизведён дважды через удаление из Recents — 2026-11-19 23:53:32 и
+  2026-11-20 00:42:21: `force-stop` процесса приложения с причиной `SwipeUpClean`
+  (HyperOS `ProcessSceneCleaner`), затем через **47 и 63 мс** `BatterySaverPolicy`
+  сообщает `accessibility changed to false`. Read-only снимок после второго эпизода:
   `enabled_accessibility_services=null`, `accessibility_enabled=0`,
   `Bound`/`Enabled`/`Binding`/`Crashed services` пусты.
   Ручное включение службы в настройках восстановило привязку без перезапуска процесса
@@ -1744,9 +1757,14 @@ Service — PASS; (2) после переподключения Master Switch о
   `KeyboardInterceptor` для дисплея 0 (реальная доставка конкретных клавиш этой
   проверкой не измерялась). Запуск приложения сам по себе службу не восстанавливает:
   после второго эпизода приложение открыли, а настройка осталась `0`/`null`.
+  Третий эпизод — 2026-11-20, `adb shell am force-stop` при проверке перезапуска
+  процесса: снова `accessibility_enabled=0` и `enabled_accessibility_services=null`,
+  после ручного включения служба подключилась (`onServiceConnected flags=0x20
+  filterApplied=true`), `KeyboardInterceptor` активен. То есть отключение доступности
+  сопровождает `force-stop` пакета и вне сценария удаления из Recents.
   **Не установлено:** какой компонент пишет `accessibility_enabled=0` и очищает
   `enabled_accessibility_services`. Наблюдается устойчивая временная связь
-  `SwipeUpClean → accessibility changed to false`, но причинность не доказана;
+  `force-stop → accessibility changed to false`, но причинность не доказана;
   специфика HyperOS — гипотеза, а не проверенное стандартное поведение Android.
   Сброс Master Switch в `false` (D-006) — отдельное ожидаемое следствие и не означает
   отключения службы. Кода отключения службы в приложении нет; исправление не входило
